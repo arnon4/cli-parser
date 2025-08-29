@@ -296,19 +296,13 @@ fn valueToString(comptime T: type, value: T, allocator: std.mem.Allocator) ![]co
         },
         .@"struct", .@"union", .@"enum" => {
             // Use JSON for complex types
-            var string = std.ArrayList(u8).init(allocator);
-            defer string.deinit();
-            try std.json.stringify(value, .{}, string.writer());
-            return try string.toOwnedSlice();
+            return try std.json.Stringify.valueAlloc(allocator, value, .{});
         },
         else => {},
     }
 
     // Fallback: convert to JSON
-    var string = std.ArrayList(u8).init(allocator);
-    defer string.deinit();
-    try std.json.stringify(value, .{}, string.writer());
-    return try string.toOwnedSlice();
+    return try std.json.Stringify.valueAlloc(allocator, value, .{});
 }
 
 /// Parse a value of any type from its string representation

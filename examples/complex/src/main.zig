@@ -47,6 +47,11 @@ pub fn main() !void {
         fn call(context: ActionContext) !void {
             std.debug.print("Sub command action called!\n", .{});
 
+            // Get the global integer option
+            if (context.getOption(i32, "int")) |int_value| {
+                std.debug.print("Integer option: {d}\n", .{int_value});
+            }
+
             // Get the worker option (JSON struct)
             if (context.getOption(worker_struct, "worker")) |worker| {
                 std.debug.print("Worker from option: name={s}, id={d}\n", .{ worker.name, worker.id });

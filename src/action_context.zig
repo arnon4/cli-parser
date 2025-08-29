@@ -4,6 +4,8 @@ const std = @import("std");
 pub const ActionContext = struct {
     const Self = @This();
 
+    parent: ?*Self = null,
+    children: std.ArrayList(*Self) = .empty,
     options: std.StringHashMap(ParsedValue),
     flags: std.StringHashMap(bool),
     arguments: std.StringHashMap(ParsedValue),
@@ -38,6 +40,7 @@ pub const ActionContext = struct {
         pub fn asInt(self: ParsedValue, comptime T: type) T {
             return switch (self) {
                 .int => |i| @intCast(i),
+                .string => |s| std.fmt.parseInt(T, s, 10) catch 0,
                 else => 0,
             };
         }
@@ -45,6 +48,7 @@ pub const ActionContext = struct {
         pub fn asFloat(self: ParsedValue, comptime T: type) T {
             return switch (self) {
                 .float => |f| @floatCast(f),
+                .string => |s| std.fmt.parseFloat(T, s) catch 0.0,
                 else => 0.0,
             };
         }
@@ -52,6 +56,7 @@ pub const ActionContext = struct {
         pub fn asBool(self: ParsedValue) bool {
             return switch (self) {
                 .bool => |b| b,
+                .string => |s| std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "1"),
                 else => false,
             };
         }
@@ -96,17 +101,31 @@ pub const ActionContext = struct {
     };
 
     /// Initialize the action context
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return Self{
-            .options = std.StringHashMap(ParsedValue).init(allocator),
-            .flags = std.StringHashMap(bool).init(allocator),
-            .arguments = std.StringHashMap(ParsedValue).init(allocator),
-            .allocator = allocator,
-        };
+    pub fn init(allocator: std.mem.Allocator, parent: ?*Self) !*Self {
+        const result = try allocator.create(Self);
+
+        if (parent) |p| {
+            result.parent = p;
+            try p.children.append(allocator, result);
+        } else {
+            result.parent = null;
+        }
+
+        result.options = std.StringHashMap(ParsedValue).init(allocator);
+        result.flags = std.StringHashMap(bool).init(allocator);
+        result.arguments = std.StringHashMap(ParsedValue).init(allocator);
+        result.allocator = allocator;
+        return result;
     }
 
     /// Deinitialize the context
     pub fn deinit(self: *Self) void {
+        // Deinitialize all children first
+        for (self.children.items) |child| {
+            child.deinit();
+        }
+        self.children.deinit(self.allocator);
+
         var options_iter = self.options.iterator();
         while (options_iter.next()) |entry| {
             switch (entry.value_ptr.*) {
@@ -137,6 +156,9 @@ pub const ActionContext = struct {
         }
 
         self.arguments.deinit();
+
+        // Free the allocated ActionContext itself
+        self.allocator.destroy(self);
     }
 
     /// Set an option value
@@ -183,13 +205,21 @@ pub const ActionContext = struct {
                     break :blk null;
                 },
             };
+        } else if (self.parent) |parent| {
+            return parent.getOption(T, name);
         }
         return null;
     }
 
     /// Get a flag value by name
     pub fn getFlag(self: *const Self, name: []const u8) bool {
-        return self.flags.get(name) orelse false;
+        if (self.flags.get(name)) |value| {
+            return value;
+        } else if (self.parent) |parent| {
+            return parent.getFlag(name);
+        }
+
+        return false;
     }
 
     /// Get an argument value by name and type

@@ -34,7 +34,7 @@ pub fn main() !void {
             // access options, flags, and arguments via ActionContext
             const int_value = context.getOption(i32, "int") orelse 42;
             const flag_value = context.getFlag("verbose");
-            const arg_value = context.getArgument([]const u8, 0) orelse "no input";
+            const arg_value = context.getArgument([]const u8, "input") orelse "no input";
 
             std.debug.print("Command executed successfully\n", .{});
             std.debug.print("Integer option value: {d}\n", .{int_value});

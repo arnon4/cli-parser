@@ -104,28 +104,28 @@ fn valueToString(comptime T: type, value: T, allocator: std.mem.Allocator) ![]u8
                 try allocator.dupe(u8, value)
             else blk: {
                 // Handle dynamic slices
-                var result = std.ArrayList(u8).init(allocator);
-                defer result.deinit();
+                var result = std.ArrayList(u8).empty;
+                defer result.deinit(allocator);
 
                 for (value, 0..) |item, i| {
                     if (i > 0) try result.append(',');
                     const item_str = try valueToString(@TypeOf(item), item, allocator);
                     defer allocator.free(item_str);
-                    try result.appendSlice(item_str);
+                    try result.appendSlice(allocator, item_str);
                 }
                 break :blk try result.toOwnedSlice();
             },
             else => try allocator.dupe(u8, "?"),
         },
         .array => blk: {
-            var result = std.ArrayList(u8).init(allocator);
-            defer result.deinit();
+            var result = std.ArrayList(u8).empty;
+            defer result.deinit(allocator);
 
             for (value, 0..) |item, i| {
                 if (i > 0) try result.append(',');
                 const item_str = try valueToString(@TypeOf(item), item, allocator);
                 defer allocator.free(item_str);
-                try result.appendSlice(item_str);
+                try result.appendSlice(allocator, item_str);
             }
             break :blk try result.toOwnedSlice();
         },
@@ -144,13 +144,10 @@ fn valueToString(comptime T: type, value: T, allocator: std.mem.Allocator) ![]u8
             break :blk try std.fmt.allocPrint(allocator, "{d}", .{int_value});
         },
         .@"struct" => blk: {
-            var result = std.ArrayList(u8).init(allocator);
-            defer result.deinit();
-
-            std.json.stringify(value, .{}, result.writer()) catch {
-                try result.appendSlice("?");
+            const json = std.json.Stringify.valueAlloc(allocator, value, .{}) catch {
+                break :blk try allocator.dupe(u8, "?");
             };
-            break :blk try result.toOwnedSlice();
+            break :blk json; // caller owns and must free
         },
         else => try allocator.dupe(u8, "?"),
     };

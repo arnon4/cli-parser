@@ -13,7 +13,7 @@ pub const Parser = struct {
     /// Result type for parse operations that include context
     pub const ParseResult = struct {
         command: *command.Command,
-        context: action_context.ActionContext,
+        context: *action_context.ActionContext,
     };
 
     root_command: *command.Command,
@@ -54,7 +54,7 @@ pub const Parser = struct {
         }
 
         const result_command = try self.parseArgs(args_slice);
-        var context = action_context.ActionContext.init(self.allocator);
+        var context = try action_context.ActionContext.init(self.allocator, null);
 
         for (result_command.options.items) |opt| {
             if (opt.vtable.getName(opt.ptr)) |opt_name| {
@@ -107,7 +107,10 @@ pub const Parser = struct {
             }
         }
 
-        return ParseResult{ .command = result_command, .context = context };
+        return ParseResult{
+            .command = result_command,
+            .context = context,
+        };
     }
 
     /// Parse provided arguments array and return the command to invoke
@@ -155,6 +158,16 @@ pub const Parser = struct {
             }
 
             self.setPositionalArgument(current_command, arg, &positional_index) catch |err| {
+                if (current_command.action == null) {
+                    // Only print help -- no need to show error text
+                    const help_text = current_command.generateHelp(self.allocator) catch |help_err| {
+                        std.debug.print("Failed to generate help: {}\n", .{help_err});
+                        std.process.exit(1);
+                    };
+                    defer self.allocator.free(help_text);
+                    std.debug.print("{s}\n", .{help_text});
+                    std.process.exit(1);
+                }
                 self.handleArgumentParseError(current_command, positional_index, arg, err);
             };
         }
@@ -236,6 +249,19 @@ pub const Parser = struct {
                 continue;
             }
 
+            // Check parent command flags
+            if (cmd.parent) |parent_cmd| {
+                for (parent_cmd.flags.items) |flag_item| {
+                    if (flag_item.short) |short| {
+                        if (short == short_char) {
+                            flag_item.setFlag();
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Then check if it's an option
             for (cmd.options.items) |option_item| {
                 if (option_item.vtable.getShort(option_item.ptr)) |short| {
@@ -261,6 +287,34 @@ pub const Parser = struct {
                 }
             }
 
+            // Check parent command options
+            if (cmd.parent) |parent_cmd| {
+                for (parent_cmd.options.items) |option_item| {
+                    if (option_item.vtable.getShort(option_item.ptr)) |short| {
+                        if (short == short_char) {
+                            if (char_index + 1 < arg.len) {
+                                option_item.vtable.setValueFromString(option_item.ptr, arg[char_index + 1 ..]) catch |err| {
+                                    const short_str = [_]u8{short_char};
+                                    return self.handleOptionParseError(parent_cmd, &short_str, arg[char_index + 1 ..], err);
+                                };
+                                return start_index + 1;
+                            } else {
+                                // Value should be next argument
+                                if (start_index + 1 >= args.len) {
+                                    return error.MissingOptionValue;
+                                }
+                                option_item.vtable.setValueFromString(option_item.ptr, args[start_index + 1]) catch |err| {
+                                    const short_str = [_]u8{short_char};
+                                    return self.handleOptionParseError(parent_cmd, &short_str, args[start_index + 1], err);
+                                };
+                                return start_index + 2;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // If we reach here, the short option was not found
             return error.UnknownOption;
         }
 
