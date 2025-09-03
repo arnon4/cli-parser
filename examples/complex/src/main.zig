@@ -18,7 +18,7 @@ pub fn main() !void {
     defer int_opt.deinit();
     _ = int_opt.withName("int")
         .withShort('i')
-        .withDefault(42);
+        .withDefaultValue(42);
 
     const worker_struct = struct {
         name: []const u8,
@@ -35,7 +35,7 @@ pub fn main() !void {
     defer str_arg.deinit();
 
     // Create a struct argument for testing JSON parsing
-    var struct_arg = try Argument(worker_struct).init("worker_arg", "A worker struct argument", false, allocator);
+    var struct_arg = try Argument(worker_struct).init("worker_arg", "A worker struct argument", true, allocator);
     defer struct_arg.deinit();
 
     // Create flags
@@ -45,29 +45,37 @@ pub fn main() !void {
     // Create action function
     const action: ActionFn = struct {
         fn call(context: ActionContext) !void {
-            std.debug.print("Sub command action called!\n", .{});
+            var buf: [512]u8 = undefined;
+            var writer = std.fs.File.stdout().writer(&buf);
+            const out: *std.io.Writer = &writer.interface;
+            try out.print("Sub command action called!\n", .{});
 
             // Get the global integer option
-            if (context.getOption(i32, "int")) |int_value| {
-                std.debug.print("Integer option: {d}\n", .{int_value});
-            }
+            const int_opt_value = context.getOption(i32, "int") catch unreachable; // Has default, so always present
+            try out.print("Global integer option: {d}\n", .{int_opt_value});
 
             // Get the worker option (JSON struct)
-            if (context.getOption(worker_struct, "worker")) |worker| {
-                std.debug.print("Worker from option: name={s}, id={d}\n", .{ worker.name, worker.id });
+            const worker_struct_value: ?worker_struct = context.getOption(worker_struct, "worker") catch null;
+            if (worker_struct_value) |w| {
+                try out.print("Worker from option: name={s}, id={d}\n", .{ w.name, w.id });
+            } else {
+                try out.print("No worker option provided.\n", .{});
             }
 
             // Get the string argument (by name)
-            if (context.getArgument([]const u8, "input")) |input| {
-                std.debug.print("String argument: {s}\n", .{input});
+            const input_value: ?[]const u8 = context.getArgument([]const u8, "input") catch null;
+            if (input_value == null) {
+                try out.print("No input argument provided.\n", .{});
+            } else {
+                try out.print("Input argument: {s}\n", .{input_value.?});
             }
 
             // Get the struct argument (by name, JSON struct)
-            if (context.getArgument(worker_struct, "worker_arg")) |worker_arg| {
-                std.debug.print("Worker from argument: name={s}, id={d}\n", .{ worker_arg.name, worker_arg.id });
-            }
+            const worker_arg: worker_struct = context.getArgument(worker_struct, "worker_arg") catch unreachable; // Required, so present or help shown
+            try out.print("Worker from argument: name={s}, id={d}\n", .{ worker_arg.name, worker_arg.id });
 
-            std.debug.print("Action completed successfully!\n", .{});
+            try out.print("Action completed successfully!\n", .{});
+            try out.flush();
         }
     }.call;
 
@@ -80,24 +88,20 @@ pub fn main() !void {
     defer sub_cmd.deinit();
 
     // Register options, arguments, flags, and action
-    _ = try sub_cmd.withOption(worker_struct, worker_opt);
-    _ = try sub_cmd.withArgument([]const u8, str_arg);
-    _ = try sub_cmd.withArgument(worker_struct, struct_arg);
-    _ = sub_cmd.withAction(action);
+    _ = sub_cmd.withOption(worker_struct, worker_opt)
+        .withArgument([]const u8, str_arg)
+        .withArgument(worker_struct, struct_arg)
+        .withAction(action);
 
-    _ = try cmd.withOption(i32, int_opt);
-    _ = try cmd.withFlag(flag);
-
-    // Register the subcommand
-    _ = try cmd.withSubcommand(sub_cmd);
+    _ = cmd.withOption(i32, int_opt)
+        .withFlag(flag)
+        .withSubcommand(sub_cmd); // Register the subcommand
 
     // Create parser
     var parser = Parser.init(cmd, allocator);
-
+    defer parser.deinit();
     // Parse command line arguments and get both command and context
-    var result = try parser.parseWithContext();
-    defer result.context.deinit();
+    const result = try parser.parse();
 
-    // Execute the command action with the populated context
-    try result.command.execute(result.context);
+    try result.command.invoke(result.context);
 }

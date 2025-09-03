@@ -1,5 +1,12 @@
 const std = @import("std");
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
+
+const ActionContext = @import("action_context.zig").ActionContext;
+const Arity = @import("arity.zig").Arity;
+const ExitCode = @import("exit_code.zig").ExitCode;
+const exit = @import("exit_code.zig").exit;
 
 /// Generic Option constructor function
 pub fn Option(comptime T: type) type {
@@ -9,12 +16,13 @@ pub fn Option(comptime T: type) type {
         name: ?[]const u8 = null,
         short: ?u8 = null,
         description: []const u8,
-        default_value: ?T = null,
-        value: ?T = null,
+        default_value: ?ArrayList(T) = null,
+        value: ?ArrayList(T) = null,
         allocator: std.mem.Allocator,
+        arity: Arity = Arity.zero_or_one,
 
         /// Initialize an option
-        pub fn init(description: []const u8, allocator: std.mem.Allocator) !*Self {
+        pub fn init(description: []const u8, allocator: Allocator) !*Self {
             const option = try allocator.create(Self);
             option.* = Self{
                 .description = description,
@@ -25,6 +33,12 @@ pub fn Option(comptime T: type) type {
 
         /// Deinitialize the option and free its memory
         pub fn deinit(self: *Self) void {
+            if (self.default_value != null) {
+                self.default_value.?.deinit(self.allocator);
+            }
+            if (self.value != null) {
+                self.value.?.deinit(self.allocator);
+            }
             self.allocator.destroy(self);
         }
 
@@ -40,15 +54,57 @@ pub fn Option(comptime T: type) type {
             return self;
         }
 
-        /// Set the default value for the option
-        pub fn withDefault(self: *Self, default_value: T) *Self {
-            self.default_value = default_value;
+        /// Set the default values for the option
+        pub fn withDefaultValues(self: *Self, default_values: []const T) *Self {
+            if (self.default_value != null) {
+                @panic("Default value already set");
+            }
+            if (default_values.len < self.arity.min or default_values.len > self.arity.max) {
+                @panic("Value length does not meet option arity requirements");
+            }
+            self.default_value = ArrayList(T).empty;
+            self.default_value.?.appendSlice(self.allocator, default_values) catch {
+                std.log.err("OutOfMemory when setting default value for option\n", .{});
+                exit(ExitCode.OutOfMemory);
+            };
             return self;
         }
 
-        /// Set the current value for the option
+        /// Convenience: set a single default value (only if arity allows at most 1)
+        pub fn withDefaultValue(self: *Self, value: T) *Self {
+            if (self.arity.max > 1) @panic("withDefaultValue only valid when arity max <= 1");
+            var buf: [1]T = undefined;
+            buf[0] = value;
+            return self.withDefaultValues(buf[0..1]);
+        }
+
+        /// Set the current values for the option
+        pub fn withValues(self: *Self, values: []const T) *Self {
+            if (self.value != null) {
+                @panic("Value already set");
+            }
+            if (values.len < self.arity.min or values.len > self.arity.max) {
+                @panic("Value length does not meet option arity requirements");
+            }
+            self.value = ArrayList(T).empty;
+            self.value.?.appendSlice(self.allocator, values) catch {
+                std.log.err("OutOfMemory when setting value for option\n", .{});
+                exit(ExitCode.OutOfMemory);
+            };
+            return self;
+        }
+
+        /// Convenience: set a single value (only if arity allows at most 1)
         pub fn withValue(self: *Self, value: T) *Self {
-            self.value = value;
+            if (self.arity.max > 1) @panic("withValue (singular) only valid when arity max <= 1");
+            var buf: [1]T = undefined;
+            buf[0] = value;
+            return self.withValues(buf[0..1]);
+        }
+
+        /// Set the arity for the option
+        pub fn withArity(self: *Self, arity: Arity) *Self {
+            self.arity = arity;
             return self;
         }
 
@@ -58,19 +114,34 @@ pub fn Option(comptime T: type) type {
         }
 
         /// Get the default value as a string, returns null if no default is set
-        pub fn getDefaultValueAsString(self: *const Self, allocator: std.mem.Allocator) !?[]u8 {
+        /// Caller owns the returned memory and must free both the individual strings and the array
+        pub fn getDefaultValueAsString(self: *const Self) !?[][]u8 {
             if (self.default_value) |default| {
-                return try valueToString(T, default, allocator);
+                var result = std.ArrayList([]u8).empty;
+                errdefer {
+                    for (result.items) |str| {
+                        self.allocator.free(str);
+                    }
+                    result.deinit(self.allocator);
+                }
+
+                for (default.items) |item| {
+                    const item_str = try valueToString(T, item, self.allocator);
+                    try result.append(self.allocator, item_str);
+                }
+
+                return try result.toOwnedSlice(self.allocator);
             }
             return null;
         }
+
         /// Get the value of the option, returns default if not set, error if neither is available
-        pub fn getValue(self: *const Self) !T {
+        pub fn getValue(self: *const Self) ![]T {
             if (self.value) |v| {
-                return v;
+                return v.items;
             }
             if (self.default_value) |d| {
-                return d;
+                return d.items;
             }
             return error.NoValueSet;
         }
@@ -85,9 +156,31 @@ pub fn Option(comptime T: type) type {
             return self.short;
         }
 
+        /// Get the arity of the option
+        pub fn getArity(self: *const Self) Arity {
+            return self.arity;
+        }
+
+        /// Check if the option has a value set
+        pub fn hasValue(self: *const Self) bool {
+            return self.value != null;
+        }
+
+        /// Check if the option has a default value
+        pub fn hasDefault(self: *const Self) bool {
+            return self.default_value != null;
+        }
+
         /// Set the value of the option
         pub fn setValue(self: *Self, value: T) void {
-            self.value = value;
+            if (self.value == null) {
+                self.value = ArrayList(T).empty;
+            }
+
+            self.value.?.append(self.allocator, value) catch {
+                std.log.err("OutOfMemory when setting value for option\n", .{});
+                exit(ExitCode.OutOfMemory);
+            };
         }
     };
 }
@@ -116,18 +209,6 @@ fn valueToString(comptime T: type, value: T, allocator: std.mem.Allocator) ![]u8
                 break :blk try result.toOwnedSlice();
             },
             else => try allocator.dupe(u8, "?"),
-        },
-        .array => blk: {
-            var result = std.ArrayList(u8).empty;
-            defer result.deinit(allocator);
-
-            for (value, 0..) |item, i| {
-                if (i > 0) try result.append(',');
-                const item_str = try valueToString(@TypeOf(item), item, allocator);
-                defer allocator.free(item_str);
-                try result.appendSlice(allocator, item_str);
-            }
-            break :blk try result.toOwnedSlice();
         },
         .@"enum" => blk: {
             // Convert enum to its field name
@@ -170,81 +251,6 @@ fn parseEnum(comptime EnumType: type, str_value: []const u8) !EnumType {
     return error.InvalidEnumValue;
 }
 
-/// Parse a fixed-size array from a CSV string
-fn parseFixedArray(comptime ArrayType: type, str_value: []const u8) !ArrayType {
-    const type_info = @typeInfo(ArrayType);
-    if (type_info != .array) {
-        @compileError("parseFixedArray only works with array types");
-    }
-
-    const array_info = type_info.array;
-    const ElementType = array_info.child;
-
-    var result: ArrayType = undefined;
-    var iterator = std.mem.splitScalar(u8, str_value, ',');
-    var index: usize = 0;
-
-    while (iterator.next()) |element_str| {
-        if (index >= array_info.len) {
-            return error.TooManyElements;
-        }
-
-        // Trim whitespace from each element
-        const trimmed = std.mem.trim(u8, element_str, " \t\r\n");
-
-        // Parse elements recursively using parseValueFromString
-        result[index] = try parseValueFromString(ElementType, trimmed);
-        index += 1;
-    }
-
-    if (index != array_info.len) {
-        return error.NotEnoughElements;
-    }
-
-    return result;
-}
-
-/// Parse a dynamic slice from a CSV string
-fn parseSlice(comptime SliceType: type, str_value: []const u8, allocator: std.mem.Allocator) !SliceType {
-    const type_info = @typeInfo(SliceType);
-    if (type_info != .pointer or type_info.pointer.size != .slice) {
-        @compileError("parseSlice only works with slice types");
-    }
-
-    const ElementType = type_info.pointer.child;
-
-    if (str_value.len == 0) {
-        return try allocator.alloc(ElementType, 0);
-    }
-
-    var count: usize = 0;
-    var count_iterator = std.mem.splitScalar(u8, str_value, ',');
-    while (count_iterator.next() != null) {
-        count += 1;
-    }
-
-    if (count == 0) {
-        return try allocator.alloc(ElementType, 0);
-    }
-
-    const result = try allocator.alloc(ElementType, count);
-    errdefer allocator.free(result);
-
-    var iterator = std.mem.splitScalar(u8, str_value, ',');
-    var index: usize = 0;
-
-    while (iterator.next()) |element_str| {
-        // Trim whitespace from each element
-        const trimmed = std.mem.trim(u8, element_str, " \t\r\n");
-
-        // Parse elements recursively using parseValueFromString
-        result[index] = try parseValueFromString(ElementType, trimmed);
-        index += 1;
-    }
-
-    return result;
-}
-
 /// Parse a JSON string into the specified struct type
 fn parseStruct(comptime StructType: type, str_value: []const u8, allocator: std.mem.Allocator) !StructType {
     const type_info = @typeInfo(StructType);
@@ -257,7 +263,9 @@ fn parseStruct(comptime StructType: type, str_value: []const u8, allocator: std.
         StructType,
         allocator,
         str_value,
-        .{ .ignore_unknown_fields = true },
+        .{
+            .ignore_unknown_fields = true,
+        },
     ) catch |err| switch (err) {
         error.SyntaxError => return error.InvalidJsonFormat,
         error.UnexpectedToken => return error.InvalidJsonFormat,
@@ -300,14 +308,10 @@ pub fn parseValueFromStringWithAllocator(comptime T: type, str_value: []const u8
         .int => try std.fmt.parseInt(T, str_value, 10),
         .float => try std.fmt.parseFloat(T, str_value),
         .pointer => |ptr_info| switch (ptr_info.size) {
-            .slice => if (ptr_info.child == u8)
-                str_value
-            else
-                try parseSlice(T, str_value, allocator),
+            .slice => str_value,
             else => return error.UnsupportedPointerType,
         },
         .@"enum" => try parseEnum(T, str_value),
-        .array => try parseFixedArray(T, str_value),
         .@"struct" => try parseStruct(T, str_value, allocator),
         else => return error.UnsupportedType,
     };
@@ -322,27 +326,15 @@ pub const OptionInterface = struct {
 
     const OptionVTable = struct {
         getDescription: *const fn (ptr: *anyopaque) []const u8,
-        getDefaultValueAsString: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8,
-        getValueAsString: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8,
+        getDefaultValueAsString: *const fn (ptr: *anyopaque) anyerror!?[]u8,
+        getValueAsString: *const fn (ptr: *anyopaque, allocator: Allocator) anyerror!?[][]u8,
         setValueFromString: *const fn (ptr: *anyopaque, value: []const u8) anyerror!void,
         hasValue: *const fn (ptr: *anyopaque) bool,
         getName: *const fn (ptr: *anyopaque) ?[]const u8,
         getShort: *const fn (ptr: *anyopaque) ?u8,
-        getTypedValuePtr: *const fn (ptr: *anyopaque) anyerror!*anyopaque,
-        type_info: TypeInfo,
-    };
-
-    const TypeInfo = struct {
-        name: []const u8,
-        hash: u64,
-
-        pub fn create(comptime T: type) TypeInfo {
-            const type_name = @typeName(T);
-            return TypeInfo{
-                .name = type_name,
-                .hash = comptime std.hash_map.hashString(type_name),
-            };
-        }
+        getArity: *const fn (ptr: *anyopaque) Arity,
+        hasDefault: *const fn (ptr: *anyopaque) bool,
+        type_name: []const u8,
     };
 
     /// Create an OptionInterface from a typed option
@@ -350,7 +342,6 @@ pub const OptionInterface = struct {
         const T = @TypeOf(option_ptr.*);
 
         const Vtable = struct {
-            const type_info = TypeInfo.create(InnerType);
             const vtable = OptionVTable{
                 .getDescription = struct {
                     fn getDescription(ptr: *anyopaque) []const u8 {
@@ -359,17 +350,56 @@ pub const OptionInterface = struct {
                     }
                 }.getDescription,
                 .getDefaultValueAsString = struct {
-                    fn getDefaultValueAsString(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8 {
+                    fn getDefaultValueAsString(ptr: *anyopaque) anyerror!?[]u8 {
                         const self: *T = @ptrCast(@alignCast(ptr));
-                        return self.getDefaultValueAsString(allocator);
+                        const values = self.getDefaultValueAsString() catch return null;
+                        if (values == null) return null; // nothing set
+
+                        var ret_slice: ?[]u8 = null;
+                        defer {
+                            // Free original per-item allocations and outer slice after creating return slice
+                            if (values) |vals| {
+                                for (vals) |s| self.allocator.free(s);
+                                self.allocator.free(vals);
+                            }
+                        }
+
+                        if (values.?.len == 0) {
+                            ret_slice = try self.allocator.dupe(u8, "");
+                        } else if (values.?.len == 1) {
+                            ret_slice = try self.allocator.dupe(u8, values.?[0]);
+                        } else {
+                            var result = std.ArrayList(u8).empty;
+                            defer result.deinit(self.allocator);
+                            for (values.?, 0..) |value, i| {
+                                if (i > 0) try result.appendSlice(self.allocator, ", ");
+                                try result.appendSlice(self.allocator, value);
+                            }
+                            ret_slice = try result.toOwnedSlice(self.allocator);
+                        }
+                        return ret_slice;
                     }
                 }.getDefaultValueAsString,
                 .getValueAsString = struct {
-                    fn getValueAsString(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
+                    fn getValueAsString(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!?[][]u8 {
                         const self: *T = @ptrCast(@alignCast(ptr));
-                        const value = try self.getValue();
+                        const values = self.getValue() catch return null;
 
-                        return try valueToString(InnerType, value, allocator);
+                        // Convert array of values to array of strings
+                        var result = std.ArrayList([]u8).empty;
+                        errdefer {
+                            for (result.items) |str| {
+                                allocator.free(str);
+                            }
+                            result.deinit(self.allocator);
+                        }
+
+                        for (values) |value| {
+                            const value_str = try valueToString(InnerType, value, allocator);
+                            try result.append(allocator, value_str);
+                        }
+
+                        return try result.toOwnedSlice(allocator);
                     }
                 }.getValueAsString,
                 .setValueFromString = struct {
@@ -410,22 +440,19 @@ pub const OptionInterface = struct {
                         return self.getShort();
                     }
                 }.getShort,
-                .getTypedValuePtr = struct {
-                    fn getTypedValuePtr(ptr: *anyopaque) anyerror!*anyopaque {
+                .getArity = struct {
+                    fn getArity(ptr: *anyopaque) Arity {
                         const self: *T = @ptrCast(@alignCast(ptr));
-
-                        _ = try self.getValue();
-
-                        if (self.value) |*val_ptr| {
-                            return @ptrCast(val_ptr);
-                        } else if (self.default_value) |*default_ptr| {
-                            return @ptrCast(default_ptr);
-                        } else {
-                            return error.NoValueSet;
-                        }
+                        return self.getArity();
                     }
-                }.getTypedValuePtr,
-                .type_info = type_info,
+                }.getArity,
+                .hasDefault = struct {
+                    fn hasDefault(ptr: *anyopaque) bool {
+                        const self: *T = @ptrCast(@alignCast(ptr));
+                        return self.hasDefault();
+                    }
+                }.hasDefault,
+                .type_name = @typeName(InnerType),
             };
         };
 
@@ -441,12 +468,13 @@ pub const OptionInterface = struct {
     }
 
     /// Get the default value as a string, returns null if no default is set
-    pub fn getDefaultValueAsString(self: Self, allocator: std.mem.Allocator) !?[]u8 {
-        return self.vtable.getDefaultValueAsString(self.ptr, allocator);
+    pub fn getDefaultValueAsString(self: Self) !?[]u8 {
+        return self.vtable.getDefaultValueAsString(self.ptr);
     }
 
-    /// Get the value of the option as a string
-    pub fn getValueAsString(self: Self, allocator: std.mem.Allocator) ![]u8 {
+    /// Get the value of the option as an array of strings, returns null if no value is set
+    /// Caller owns the returned memory and must free both the individual strings and the array
+    pub fn getValueAsString(self: Self, allocator: std.mem.Allocator) !?[][]u8 {
         return self.vtable.getValueAsString(self.ptr, allocator);
     }
 
@@ -470,44 +498,23 @@ pub const OptionInterface = struct {
         return self.vtable.getShort(self.ptr);
     }
 
-    /// Get the type information for type identification
-    pub fn getTypeInfo(self: Self) TypeInfo {
-        return self.vtable.type_info;
+    /// Get the arity of the option
+    pub fn getArity(self: Self) Arity {
+        return self.vtable.getArity(self.ptr);
     }
 
-    /// Get the type hash for type identification
-    pub fn getTypeHash(self: Self) u64 {
-        return self.vtable.type_info.hash;
+    /// Check if the option has a default value
+    pub fn hasDefault(self: Self) bool {
+        return self.vtable.hasDefault(self.ptr);
     }
 
-    /// Get the type name
+    /// Get the type name as a string
     pub fn getTypeName(self: Self) []const u8 {
-        return self.vtable.type_info.name;
+        return self.vtable.type_name;
     }
 
-    /// Get the typed value of the option - caller must know the correct type
-    /// The type must match exactly or TypeMismatch error will be returned
-    pub fn getOptionValue(self: Self, comptime T: type) !T {
-        // Verify the type matches
-        const expected_hash = comptime std.hash_map.hashString(@typeName(T));
-        if (self.vtable.type_info.hash != expected_hash) {
-            return error.TypeMismatch;
-        }
-
-        // Get the typed value pointer and cast it back
-        const value_ptr = try self.vtable.getTypedValuePtr(self.ptr);
-        const typed_ptr: *T = @ptrCast(@alignCast(value_ptr));
-        return typed_ptr.*;
-    }
-
-    /// Try to get the value as a specific type, returns null if type doesn't match
-    pub fn tryGetValue(self: Self, comptime T: type) ?T {
-        return self.getOptionValue(T) catch null;
-    }
-
-    /// Check if the option is of a specific type
+    /// Check if the option is of a specific type by comparing type names
     pub fn isType(self: Self, comptime T: type) bool {
-        const expected_hash = comptime std.hash_map.hashString(@typeName(T));
-        return self.vtable.type_info.hash == expected_hash;
+        return std.mem.eql(u8, self.vtable.type_name, @typeName(T));
     }
 };

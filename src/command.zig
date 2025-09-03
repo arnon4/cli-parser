@@ -1,9 +1,14 @@
 const std = @import("std");
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const log = std.log;
+
 const option = @import("option.zig");
 const flag = @import("flag.zig");
 const argument = @import("argument.zig");
 const action_context = @import("action_context.zig");
+const ExitCode = @import("exit_code.zig").ExitCode;
+const exit = @import("exit_code.zig").exit;
 
 const ArrayList = std.ArrayList;
 /// Function pointer type for command actions
@@ -19,7 +24,7 @@ pub const Command = struct {
     description: []const u8,
     parent: ?*Self = null,
     action: ?ActionFn = null,
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
 
     options: ArrayList(option.OptionInterface) = .empty,
     flags: ArrayList(*flag.Flag) = .empty,
@@ -27,7 +32,7 @@ pub const Command = struct {
     subcommands: ArrayList(*Self) = .empty,
 
     /// Initialize a command
-    pub fn init(name: []const u8, description: []const u8, allocator: std.mem.Allocator) !*Self {
+    pub fn init(name: []const u8, description: []const u8, allocator: Allocator) !*Self {
         const command = try allocator.create(Self);
         command.* = Self{
             .name = name,
@@ -39,10 +44,10 @@ pub const Command = struct {
             .subcommands = ArrayList(*Self).empty,
         };
 
-        // Automatically add help flag to every command
-        const help_flag = try flag.Flag.init("Help", false, allocator);
-        _ = help_flag.withName("help").withShort('h');
-        _ = try command.withFlag(help_flag);
+        // // Automatically add help flag to every command
+        // const help_flag = try flag.Flag.init("Help", false, allocator);
+        // _ = help_flag.withName("help").withShort('h');
+        // _ = try command.withFlag(help_flag);
 
         return command;
     }
@@ -66,35 +71,52 @@ pub const Command = struct {
     }
 
     /// Add an option to the command
-    pub fn withOption(self: *Self, comptime T: type, concrete_option: *option.Option(T)) !*Self {
+    pub fn withOption(self: *Self, comptime T: type, concrete_option: *option.Option(T)) *Self {
         const option_interface = option.OptionInterface.init(T, concrete_option);
-        try self.options.append(self.allocator, option_interface);
+        self.options.append(self.allocator, option_interface) catch {
+            log.err("Failed to add option: {s}", .{concrete_option.name.?});
+            exit(ExitCode.OutOfMemory);
+        };
+
         return self;
     }
 
     /// Add a flag to the command
-    pub fn withFlag(self: *Self, command_flag: *flag.Flag) !*Self {
-        try self.flags.append(self.allocator, command_flag);
+    pub fn withFlag(self: *Self, command_flag: *flag.Flag) *Self {
+        self.flags.append(self.allocator, command_flag) catch {
+            log.err("Failed to add flag: {s}", .{command_flag.name.?});
+            exit(ExitCode.OutOfMemory);
+        };
+
         return self;
     }
 
     /// Add an argument to the command
-    pub fn withArgument(self: *Self, comptime T: type, concrete_argument: *argument.Argument(T)) !*Self {
-        const argument_interface = argument.ArgumentInterface.create(T, concrete_argument);
-        try self.arguments.append(self.allocator, argument_interface);
+    pub fn withArgument(self: *Self, comptime T: type, concrete_argument: *argument.Argument(T)) *Self {
+        const argument_interface = argument.ArgumentInterface.init(T, concrete_argument);
+        self.arguments.append(self.allocator, argument_interface) catch {
+            log.err("Failed to add argument: {s}", .{concrete_argument.name});
+            exit(ExitCode.OutOfMemory);
+        };
+
         return self;
     }
 
     /// Add a subcommand
-    pub fn withSubcommand(self: *Self, subcommand: *Self) !*Self {
+    pub fn withSubcommand(self: *Self, subcommand: *Self) *Self {
         subcommand.parent = self;
-        try self.subcommands.append(self.allocator, subcommand);
+        self.subcommands.append(self.allocator, subcommand) catch {
+            log.err("Failed to add subcommand: {s}", .{subcommand.name});
+            exit(ExitCode.OutOfMemory);
+        };
+
         return self;
     }
 
     /// Set the action for leaf commands
     pub fn withAction(self: *Self, action: ActionFn) *Self {
         self.action = action;
+
         return self;
     }
 
@@ -114,7 +136,7 @@ pub const Command = struct {
     }
 
     /// Execute the command's action with a pre-populated context
-    pub fn execute(self: *const Self, context: *action_context.ActionContext) !void {
+    pub fn invoke(self: *const Self, context: *action_context.ActionContext) !void {
         if (self.action) |action| {
             try action(context.*);
         } else {
@@ -123,33 +145,34 @@ pub const Command = struct {
     }
 
     /// Generate help text for this command
-    pub fn generateHelp(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-        var help = ArrayList(u8).empty;
-        defer help.deinit(allocator);
-        const writer = help.writer(allocator);
+    pub fn generateHelp(self: *const Self, allocator: Allocator) !void {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(allocator);
+        var writer = std.fs.File.stdout().writer(buf.items);
+        const out: *std.io.Writer = &writer.interface;
 
-        try writer.print("{s} - {s}\n\n", .{ self.name, self.description });
-        try writer.print("USAGE:\n    {s}", .{self.name});
+        try out.print("{s} - {s}\n\n", .{ self.name, self.description });
+        try out.print("USAGE:\n    {s}", .{self.name});
 
         if (self.options.items.len > 0 or self.flags.items.len > 0) {
-            try writer.print(" [OPTIONS]", .{});
+            try out.print(" [OPTIONS]", .{});
         }
 
         if (self.subcommands.items.len > 0) {
-            try writer.print(" <COMMAND>", .{});
+            try out.print(" <COMMAND>", .{});
         }
 
         for (self.arguments.items) |arg| {
             if (arg.vtable.isRequired(arg.ptr)) {
-                try writer.print(" <{s}>", .{arg.vtable.getName(arg.ptr)});
+                try out.print(" <{s}>", .{arg.vtable.getName(arg.ptr)});
             } else {
-                try writer.print(" [{s}]", .{arg.vtable.getName(arg.ptr)});
+                try out.print(" [{s}]", .{arg.vtable.getName(arg.ptr)});
             }
         }
-        try writer.print("\n\n", .{});
+        try out.print("\n\n", .{});
 
         if (self.arguments.items.len > 0) {
-            try writer.print("ARGUMENTS:\n", .{});
+            try out.print("ARGUMENTS:\n", .{});
             for (self.arguments.items) |arg| {
                 const required_str = if (arg.vtable.isRequired(arg.ptr)) "required" else "optional";
                 const arg_name = arg.vtable.getName(arg.ptr);
@@ -163,24 +186,24 @@ pub const Command = struct {
                 const arg_str = arg_line.items;
 
                 if (arg_str.len <= HELP_PADDING) {
-                    try writer.print("{s}", .{arg_str});
+                    try out.print("{s}", .{arg_str});
                     const padding = HELP_PADDING - arg_str.len;
                     var i: usize = 0;
                     while (i < padding) : (i += 1) {
-                        try writer.print(" ", .{});
+                        try out.print(" ", .{});
                     }
-                    try writer.print("{s} ({s})\n", .{ description, required_str });
+                    try out.print("{s} ({s})\n", .{ description, required_str });
                 } else {
-                    try writer.print("{s}\n", .{arg_str});
-                    try writer.print("                              {s} ({s})\n", .{ description, required_str });
+                    try out.print("{s}\n", .{arg_str});
+                    try out.print("                              {s} ({s})\n", .{ description, required_str });
                 }
             }
-            try writer.print("\n", .{});
+            try out.print("\n", .{});
         }
 
         // Options section
         if (self.options.items.len > 0) {
-            try writer.print("OPTIONS:\n", .{});
+            try out.print("OPTIONS:\n", .{});
             for (self.options.items) |opt| {
                 if (opt.vtable.getName(opt.ptr)) |name| {
                     // Build the option flag line
@@ -203,26 +226,26 @@ pub const Command = struct {
 
                     try full_description.appendSlice(allocator, description);
 
-                    if (try opt.vtable.getDefaultValueAsString(opt.ptr, allocator)) |default_str| {
+                    if (try opt.vtable.getDefaultValueAsString(opt.ptr)) |default_str| {
                         defer allocator.free(default_str);
                         try full_description.writer(allocator).print(" (default: {s})", .{default_str});
                     }
 
                     if (flag_str.len <= HELP_PADDING) {
-                        try writer.print("{s}", .{flag_str});
+                        try out.print("{s}", .{flag_str});
                         const padding = HELP_PADDING - flag_str.len;
                         var i: usize = 0;
                         while (i < padding) : (i += 1) {
-                            try writer.print(" ", .{});
+                            try out.print(" ", .{});
                         }
-                        try writer.print("{s}\n", .{full_description.items});
+                        try out.print("{s}\n", .{full_description.items});
                     } else {
-                        try writer.print("{s}\n", .{flag_str});
-                        try writer.print("                              {s}\n", .{full_description.items});
+                        try out.print("{s}\n", .{flag_str});
+                        try out.print("                              {s}\n", .{full_description.items});
                     }
                 }
             }
-            try writer.print("\n", .{});
+            try out.print("\n", .{});
         }
 
         var has_flags = false;
@@ -231,7 +254,7 @@ pub const Command = struct {
             if (fl.name) |name| {
                 if (!std.mem.eql(u8, name, "help")) {
                     if (!has_flags) {
-                        try writer.print("FLAGS:\n", .{});
+                        try out.print("FLAGS:\n", .{});
                         has_flags = true;
                     }
 
@@ -249,43 +272,42 @@ pub const Command = struct {
                     const description = fl.getDescription();
 
                     if (flag_str.len <= HELP_PADDING) {
-                        try writer.print("{s}", .{flag_str});
+                        try out.print("{s}", .{flag_str});
                         const padding = HELP_PADDING - flag_str.len;
                         var i: usize = 0;
                         while (i < padding) : (i += 1) {
-                            try writer.print(" ", .{});
+                            out.print(" ", .{}) catch {
+                                std.debug.print("Fatal error occurred", .{});
+                                std.process.exit(1);
+                            };
                         }
-                        try writer.print("{s}\n", .{description});
+                        try out.print("{s}\n", .{description});
                     } else {
-                        try writer.print("{s}\n", .{flag_str});
-                        try writer.print("                              {s}\n", .{description});
+                        try out.print("{s}\n", .{flag_str});
+                        try out.print("                              {s}\n", .{description});
                     }
                 }
             }
         }
 
         if (!has_flags) {
-            try writer.print("FLAGS:\n", .{});
+            try out.print("FLAGS:\n", .{});
         }
 
         const help_flag_str = "  -h, --help";
-        try writer.print("{s}", .{help_flag_str});
+        try out.print("{s}", .{help_flag_str});
         const padding = HELP_PADDING - help_flag_str.len;
-        var i: usize = 0;
-        while (i < padding) : (i += 1) {
-            try writer.print(" ", .{});
-        }
-        try writer.print("Print this message and exit\n", .{});
+        const padding_str = " " ** padding;
+        try out.print("{s}", .{padding_str});
+        try out.print("Print this message and exit\n", .{});
 
         if (self.subcommands.items.len > 0) {
-            try writer.print("\nCOMMANDS:\n", .{});
+            try out.print("\nCOMMANDS:\n", .{});
             for (self.subcommands.items) |sub| {
-                try writer.print("  {s}\n", .{sub.name});
-                try writer.print("          {s}\n", .{sub.description});
+                try out.print("  {s}\n", .{sub.name});
+                try out.print("          {s}\n", .{sub.description});
             }
         }
-
-        return try allocator.dupe(u8, help.items);
     }
 
     /// Find an option by name
@@ -357,16 +379,6 @@ pub const Command = struct {
             return parent.findFlagByShort(short);
         }
 
-        return null;
-    }
-
-    /// Find a subcommand by name
-    pub fn findSubcommand(self: *const Self, name: []const u8) ?*Self {
-        for (self.subcommands.items) |subcmd| {
-            if (std.mem.eql(u8, subcmd.name, name)) {
-                return subcmd;
-            }
-        }
         return null;
     }
 

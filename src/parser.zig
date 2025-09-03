@@ -1,10 +1,14 @@
 const std = @import("std");
 const testing = @import("std").testing;
+const ArgIterator = std.process.ArgIterator;
 const option = @import("option.zig");
 const flag = @import("flag.zig");
 const argument = @import("argument.zig");
 const command = @import("command.zig");
 const action_context = @import("action_context.zig");
+const ActionContext = action_context.ActionContext;
+const ParsedValue = ActionContext.ParsedValue;
+const Allocator = std.mem.Allocator;
 
 /// Parser for processing command-line arguments into command structures
 pub const Parser = struct {
@@ -12,172 +16,154 @@ pub const Parser = struct {
 
     /// Result type for parse operations that include context
     pub const ParseResult = struct {
+        const This = @This();
         command: *command.Command,
-        context: *action_context.ActionContext,
+        context: *ActionContext,
+        allocator: Allocator,
     };
 
     root_command: *command.Command,
     allocator: std.mem.Allocator,
+    parse_result: ?*ParseResult,
+    print_help: bool = false,
+    has_errors: bool = false,
 
     /// Initialize the parser
-    pub fn init(root_command: *command.Command, allocator: std.mem.Allocator) Self {
+    pub fn init(root_command: *command.Command, allocator: Allocator) Self {
         return Self{
             .root_command = root_command,
             .allocator = allocator,
+            .parse_result = null,
         };
     }
 
-    /// Parse command-line arguments and return the command to invoke
-    pub fn parse(self: *Self) !*command.Command {
-        const args = try std.process.argsAlloc(self.allocator);
-        defer std.process.argsFree(self.allocator, args);
-
-        return try self.parseArgs(args);
+    pub fn deinit(self: *Self) void {
+        if (self.parse_result) |result| {
+            result.context.deinit(); // commands are managed by the user
+            self.allocator.destroy(result);
+        }
     }
 
     /// Parse command-line arguments and return both command and populated context
-    pub fn parseWithContext(self: *Self) !ParseResult {
-        // Get arguments using argsAlloc
-        const args = try std.process.argsAlloc(self.allocator);
-        defer std.process.argsFree(self.allocator, args);
+    pub fn parse(self: *Self) !*ParseResult {
+        var args = try std.process.argsWithAllocator(self.allocator);
+        _ = args.next(); // skip program name
+        defer args.deinit();
 
-        return try self.parseArgsWithContext(args);
-    }
+        // Parse the arguments first
+        self.parseArgs(&args);
 
-    /// Parse provided arguments and return both command and context
-    pub fn parseArgsWithContext(self: *Self, args: [][:0]u8) !ParseResult {
-        var args_slice = try self.allocator.alloc([]const u8, args.len);
-        defer self.allocator.free(args_slice);
+        // check if all required positional arguments are provided and meet arity requirements
+        if (self.parse_result) |result| {
+            for (result.command.arguments.items) |arg| {
+                const arg_name = arg.getName();
+                const arity = arg.getArity();
+                const maybe_value = result.context.arguments.get(arg_name);
 
-        for (args, 0..) |arg, i| {
-            args_slice[i] = arg;
-        }
-
-        const result_command = try self.parseArgs(args_slice);
-        var context = try action_context.ActionContext.init(self.allocator, null);
-
-        for (result_command.options.items) |opt| {
-            if (opt.vtable.getName(opt.ptr)) |opt_name| {
-                if (opt.vtable.hasValue(opt.ptr)) {
-                    const type_info = opt.vtable.type_info;
-
-                    if (std.mem.indexOf(u8, type_info.name, "struct") != null) {
-                        const value_str = try opt.vtable.getValueAsString(opt.ptr, self.allocator);
-                        defer self.allocator.free(value_str);
-                        const owned_value = try self.allocator.dupe(u8, value_str);
-                        try context.setOption(opt_name, action_context.ActionContext.ParsedValue{ .string = owned_value });
-                    } else {
-                        const value_str = try opt.vtable.getValueAsString(opt.ptr, self.allocator);
-                        defer self.allocator.free(value_str);
-                        const owned_value = try self.allocator.dupe(u8, value_str);
-                        try context.setOption(opt_name, action_context.ActionContext.ParsedValue{ .string = owned_value });
+                var value_count: usize = 0;
+                if (maybe_value) |value| {
+                    // Count values by splitting on commas
+                    const Iter = std.mem.SplitIterator(u8, .scalar);
+                    var it = Iter{
+                        .buffer = value.value,
+                        .index = 0,
+                        .delimiter = ',',
+                    };
+                    while (it.next()) |_| {
+                        value_count += 1;
                     }
                 }
-            }
-        }
 
-        for (result_command.flags.items) |fl| {
-            if (fl.name) |flag_name| {
-                try context.setFlag(flag_name, fl.getValue());
-            }
-        }
-
-        if (result_command.arguments.items.len > 0) {
-            for (result_command.arguments.items) |arg| {
-                if (arg.vtable.hasValue(arg.ptr)) {
-                    const value = try arg.vtable.getValue(arg.ptr);
-                    defer self.allocator.free(value); // Free the original allocated string
-                    const owned_value = try self.allocator.dupe(u8, value);
-                    const arg_name = arg.vtable.getName(arg.ptr);
-                    try context.setArgument(arg_name, action_context.ActionContext.ParsedValue{ .string = owned_value });
+                if (value_count < arity.min) {
+                    var writer = std.fs.File.stderr().writer(&.{});
+                    const err = &writer.interface;
+                    if (arg.isRequired()) {
+                        err.print("Missing required positional argument: {s} (needs at least {d} value(s))\n", .{ arg_name, arity.min }) catch {
+                            std.log.err("Fatal error occurred", .{});
+                        };
+                    } else {
+                        err.print("Argument {s} needs at least {d} value(s), got {d}\n", .{ arg_name, arity.min, value_count }) catch {
+                            std.log.err("Fatal error occurred", .{});
+                        };
+                    }
+                    self.print_help = true;
+                    self.has_errors = true;
                 }
             }
         }
 
-        // Check if help flag was set
-        for (result_command.flags.items) |fl| {
-            if (fl.name) |name| {
-                if (std.mem.eql(u8, name, "help") and fl.getValue()) {
-                    const help_text = try result_command.generateHelp(self.allocator);
-                    defer self.allocator.free(help_text);
-                    std.debug.print("{s}", .{help_text});
-                    context.deinit();
-                    std.process.exit(0);
-                }
-            }
+        // Set default values for options that weren't provided
+        self.setDefaultValues();
+
+        // Check if help should be printed after parsing
+        if (self.print_help) {
+            const command_for_help = if (self.parse_result) |result| result.command else self.root_command;
+            command_for_help.generateHelp(self.allocator) catch {
+                std.log.err("Failed to generate help message\n", .{});
+            };
+            std.process.exit(0);
         }
 
-        return ParseResult{
-            .command = result_command,
-            .context = context,
-        };
+        // If there were parsing errors, print help and exit
+        if (self.has_errors) {
+            const command_for_help = if (self.parse_result) |result| result.command else self.root_command;
+            command_for_help.generateHelp(self.allocator) catch {
+                std.log.err("Failed to generate help message\n", .{});
+            };
+            std.process.exit(1);
+        }
+
+        return self.parse_result.?;
     }
 
-    /// Parse provided arguments array and return the command to invoke
-    pub fn parseArgs(self: *Self, args: [][]const u8) !*command.Command {
-        if (args.len == 0) {
-            return self.root_command;
-        }
-
-        var current_command = self.root_command;
-        var arg_index: usize = 1; // Skip program name
-
+    fn parseArgs(self: *Self, args: *ArgIterator) void {
+        var args_reached = false;
+        self.parse_result = self.allocator.create(ParseResult) catch {
+            self.has_errors = true;
+            return;
+        };
+        self.parse_result.?.command = self.root_command;
+        self.parse_result.?.context = ActionContext.init(self.allocator, null) catch {
+            self.has_errors = true;
+            return;
+        };
         var positional_index: usize = 0;
 
-        outer: while (arg_index < args.len) {
-            const arg = args[arg_index];
-            arg_index += 1;
-
-            // Check for double dash delimiter
-            if (std.mem.eql(u8, arg, "--")) {
-                // Everything after -- is positional arguments
-                while (arg_index < args.len) {
-                    try self.setPositionalArgument(current_command, args[arg_index], &positional_index);
-                    arg_index += 1;
-                }
+        while (args.next()) |arg| {
+            if (args_reached) {
                 break;
             }
-
-            for (current_command.subcommands.items) |sub_cmd| {
-                if (std.mem.eql(u8, sub_cmd.name, arg)) {
-                    current_command = sub_cmd;
-                    continue :outer;
-                }
+            const arg_slice = arg[0..arg.len];
+            // Process each argument
+            if (std.mem.startsWith(u8, arg_slice, "-")) {
+                self.parseHyphenArg(arg_slice, @constCast(args), &args_reached);
+            } else {
+                self.parseCommandOrPositional(arg_slice, &positional_index);
             }
-
-            // Handle options and flags
-            if (arg.len > 1 and arg[0] == '-') {
-                if (arg[1] == '-') {
-                    // Long option
-                    arg_index = try self.parseLongOption(current_command, args, arg_index - 1);
-                } else {
-                    // Short option(s)
-                    arg_index = try self.parseShortOptions(current_command, args, arg_index - 1);
-                }
-                continue;
-            }
-
-            self.setPositionalArgument(current_command, arg, &positional_index) catch |err| {
-                if (current_command.action == null) {
-                    // Only print help -- no need to show error text
-                    const help_text = current_command.generateHelp(self.allocator) catch |help_err| {
-                        std.debug.print("Failed to generate help: {}\n", .{help_err});
-                        std.process.exit(1);
-                    };
-                    defer self.allocator.free(help_text);
-                    std.debug.print("{s}\n", .{help_text});
-                    std.process.exit(1);
-                }
-                self.handleArgumentParseError(current_command, positional_index, arg, err);
-            };
         }
 
-        return current_command;
+        while (args.next()) |arg| {
+            // if we reach here, all remaining args are positional
+            self.setPositionalArgumentByIndex(arg, &positional_index);
+        }
     }
 
-    /// Parse a long option (--option)
-    fn parseLongOption(self: *Self, cmd: *command.Command, args: [][]const u8, start_index: usize) !usize {
-        const arg = args[start_index];
+    fn parseHyphenArg(self: *Self, arg: []const u8, args: *ArgIterator, args_reached: *bool) void {
+        if (std.mem.eql(u8, arg, "--")) {
+            // All following args are positional
+            args_reached.* = true;
+            return;
+        }
+        if (std.mem.startsWith(u8, arg, "--")) {
+            // Long option or flag
+            self.parseLongOption(arg, args);
+        } else {
+            // Short option(s) or flag(s)
+            self.parseShortOptions(arg, args);
+        }
+    }
+
+    fn parseLongOption(self: *Self, arg: []const u8, args: *ArgIterator) void {
         var option_name: []const u8 = undefined;
         var option_value: ?[]const u8 = null;
 
@@ -189,180 +175,392 @@ pub const Parser = struct {
             option_name = arg[2..];
         }
 
+        // Special case for --help
+        if (std.mem.eql(u8, option_name, "help")) {
+            self.print_help = true;
+            return;
+        }
+
         // First check if it's a flag
-        for (cmd.flags.items) |flag_item| {
+        for (self.parse_result.?.command.flags.items) |flag_item| {
             if (flag_item.name) |flag_name| {
                 if (std.mem.eql(u8, flag_name, option_name)) {
-                    flag_item.setFlag();
-                    return start_index + 1;
-                }
-            }
-        }
-
-        for (cmd.options.items) |option_item| {
-            if (option_item.vtable.getName(option_item.ptr)) |opt_name| {
-                if (std.mem.eql(u8, opt_name, option_name)) {
-                    if (option_value) |value| {
-                        option_item.vtable.setValueFromString(option_item.ptr, value) catch |err| {
-                            return self.handleOptionParseError(cmd, opt_name, value, err);
-                        };
-                    } else {
-                        // Value should be next argument
-                        if (start_index + 1 >= args.len) {
-                            return error.MissingOptionValue;
-                        }
-                        option_item.vtable.setValueFromString(option_item.ptr, args[start_index + 1]) catch |err| {
-                            return self.handleOptionParseError(cmd, opt_name, args[start_index + 1], err);
-                        };
-                        return start_index + 2;
+                    self.parse_result.?.context.setFlag(flag_name, true) catch {
+                        self.has_errors = true;
+                    };
+                    // Check if this is the help flag
+                    if (std.mem.eql(u8, flag_name, "help")) {
+                        self.print_help = true;
                     }
-                    return start_index + 1;
+                    return;
                 }
             }
         }
 
-        return error.UnknownOption;
+        // Then check if it's an option
+        for (self.parse_result.?.command.options.items) |option_item| {
+            if (option_item.getName()) |opt_name| {
+                if (std.mem.eql(u8, opt_name, option_name)) {
+                    self.parseOptionValues(option_item, opt_name, option_value, args);
+                    return;
+                }
+            }
+        }
+
+        // Recursively check parent commands
+        if (self.parse_result.?.command.parent) |parent_cmd| {
+            const original_command = self.parse_result.?.command;
+            self.parse_result.?.command = parent_cmd;
+            self.parseLongOption(arg, args);
+            self.parse_result.?.command = original_command;
+            return;
+        }
+
+        std.log.err("Unknown option --{s}\n", .{option_name});
+        self.has_errors = true;
+        self.print_help = true;
     }
 
-    /// Parse short option(s) (-o or -abc)
-    fn parseShortOptions(self: *Self, cmd: *command.Command, args: [][]const u8, start_index: usize) !usize {
-        const arg = args[start_index];
+    fn parseShortOptions(self: *Self, arg: []const u8, args: *ArgIterator) void {
         var char_index: usize = 1; // Skip the '-'
 
-        while (char_index < arg.len) {
-            const short_char = arg[char_index];
+        var option_name: []const u8 = undefined;
+        var option_value: ?[]const u8 = null;
 
-            // First check if it's a flag
-            var found = false;
-            for (cmd.flags.items) |flag_item| {
-                if (flag_item.short) |short| {
-                    if (short == short_char) {
-                        flag_item.setFlag();
-                        found = true;
-                        break;
-                    }
-                }
+        // Check for -o=value format
+        if (std.mem.indexOf(u8, arg, "=")) |eq_pos| {
+            option_name = arg[2..eq_pos];
+            option_value = arg[eq_pos + 1 ..];
+            if (option_value == null) {
+                std.log.err("Missing value for option -{s}\n", .{option_name});
+                return;
             }
-
-            if (found) {
-                char_index += 1;
-                continue;
-            }
-
-            // Check parent command flags
-            if (cmd.parent) |parent_cmd| {
-                for (parent_cmd.flags.items) |flag_item| {
-                    if (flag_item.short) |short| {
-                        if (short == short_char) {
-                            flag_item.setFlag();
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Then check if it's an option
-            for (cmd.options.items) |option_item| {
-                if (option_item.vtable.getShort(option_item.ptr)) |short| {
-                    if (short == short_char) {
-                        if (char_index + 1 < arg.len) {
-                            option_item.vtable.setValueFromString(option_item.ptr, arg[char_index + 1 ..]) catch |err| {
-                                const short_str = [_]u8{short_char};
-                                return self.handleOptionParseError(cmd, &short_str, arg[char_index + 1 ..], err);
-                            };
-                            return start_index + 1;
-                        } else {
-                            // Value should be next argument
-                            if (start_index + 1 >= args.len) {
-                                return error.MissingOptionValue;
-                            }
-                            option_item.vtable.setValueFromString(option_item.ptr, args[start_index + 1]) catch |err| {
-                                const short_str = [_]u8{short_char};
-                                return self.handleOptionParseError(cmd, &short_str, args[start_index + 1], err);
-                            };
-                            return start_index + 2;
-                        }
-                    }
-                }
-            }
-
-            // Check parent command options
-            if (cmd.parent) |parent_cmd| {
-                for (parent_cmd.options.items) |option_item| {
-                    if (option_item.vtable.getShort(option_item.ptr)) |short| {
-                        if (short == short_char) {
-                            if (char_index + 1 < arg.len) {
-                                option_item.vtable.setValueFromString(option_item.ptr, arg[char_index + 1 ..]) catch |err| {
-                                    const short_str = [_]u8{short_char};
-                                    return self.handleOptionParseError(parent_cmd, &short_str, arg[char_index + 1 ..], err);
-                                };
-                                return start_index + 1;
-                            } else {
-                                // Value should be next argument
-                                if (start_index + 1 >= args.len) {
-                                    return error.MissingOptionValue;
-                                }
-                                option_item.vtable.setValueFromString(option_item.ptr, args[start_index + 1]) catch |err| {
-                                    const short_str = [_]u8{short_char};
-                                    return self.handleOptionParseError(parent_cmd, &short_str, args[start_index + 1], err);
-                                };
-                                return start_index + 2;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // If we reach here, the short option was not found
-            return error.UnknownOption;
+            self.parseSinleShortOption(option_name[0], option_value.?);
+            return;
         }
 
-        return start_index + 1;
-    }
-
-    /// Set a positional argument value
-    fn setPositionalArgument(self: *Self, cmd: *command.Command, value: []const u8, positional_index: *usize) !void {
-        _ = self;
-
-        if (positional_index.* >= cmd.arguments.items.len) {
-            return error.TooManyArguments;
+        // if length > 2, it must be multiple flags
+        if (arg.len > 2) {
+            while (char_index < arg.len) : (char_index += 1) {
+                const short_flag = arg[char_index];
+                _ = self.parseSingleShortFlag(short_flag);
+            }
+            return;
         }
 
-        const arg_item = cmd.arguments.items[positional_index.*];
-        try arg_item.vtable.setValue(arg_item.ptr, value);
-        positional_index.* += 1;
+        // if length == 2, it could be a single flag or a single option
+        const short_char = arg[1];
+        if (!self.parseSingleShortFlag(short_char)) {
+            // Not a flag, try as an option
+            option_value = args.next();
+            self.parseSinleShortOption(short_char, option_value);
+        }
     }
 
-    /// Handle argument parse errors with helpful messages and help display
-    fn handleArgumentParseError(self: *Self, cmd: *const command.Command, arg_index: usize, input_value: []const u8, err: anyerror) noreturn {
-        std.debug.print("Error: Failed to parse argument at position {d}\n", .{arg_index + 1});
-        std.debug.print("Input value: {s}\n", .{input_value});
-        std.debug.print("Parse error: {}\n\n", .{err});
+    fn parseSingleShortFlag(self: *Self, short_char: u8) bool {
+        for (self.parse_result.?.command.flags.items) |flag_item| {
+            if (flag_item.short) |short| {
+                if (short == short_char) {
+                    self.parse_result.?.context.setFlag(flag_item.name.?, true) catch {
+                        self.has_errors = true;
+                    };
+                    // Check if this is the help flag
+                    if (flag_item.name) |flag_name| {
+                        if (std.mem.eql(u8, flag_name, "help")) {
+                            self.print_help = true;
+                        }
+                    }
+                    return true;
+                }
+            }
+        }
 
-        const help_text = cmd.generateHelp(self.allocator) catch |help_err| {
-            std.debug.print("Failed to generate help: {}\n", .{help_err});
-            std.process.exit(1);
-        };
-        defer self.allocator.free(help_text);
+        // Recursively check parent commands
+        if (self.parse_result.?.command.parent) |parent_cmd| {
+            const original_command = self.parse_result.?.command;
+            self.parse_result.?.command = parent_cmd;
+            const found = self.parseSingleShortFlag(short_char);
+            self.parse_result.?.command = original_command;
+            return found;
+        }
 
-        std.debug.print("{s}\n", .{help_text});
-        std.process.exit(1);
+        return false;
     }
 
-    /// Handle option parse errors with helpful messages and help display
-    fn handleOptionParseError(self: *Self, cmd: *const command.Command, option_name: []const u8, input_value: []const u8, err: anyerror) noreturn {
-        std.debug.print("Error: Failed to parse option '--{s}'\n", .{option_name});
-        std.debug.print("Input value: {s}\n", .{input_value});
-        std.debug.print("Parse error: {}\n\n", .{err});
+    fn parseOptionValues(self: *Self, option_item: anytype, opt_name: []const u8, initial_value: ?[]const u8, args: ?*ArgIterator) void {
+        const arity = option_item.getArity();
 
-        const help_text = cmd.generateHelp(self.allocator) catch |help_err| {
-            std.debug.print("Failed to generate help: {}\n", .{help_err});
-            std.process.exit(1);
+        // Gather all raw string values as individually allocated slices.
+        var values = std.ArrayList([]const u8).empty;
+        var need_free = true;
+        defer {
+            if (need_free) {
+                for (values.items) |v| self.allocator.free(v);
+            }
+            values.deinit(self.allocator);
+        }
+
+        const appendValue = struct {
+            fn append(self_parser: *Self, list: *std.ArrayList([]const u8), slice: []const u8) bool {
+                list.append(self_parser.allocator, slice) catch {
+                    self_parser.has_errors = true;
+                    return false;
+                };
+                return true;
+            }
+        }.append;
+
+        if (initial_value) |init_val| {
+            if (std.mem.indexOf(u8, init_val, ",")) |_| {
+                var it = std.mem.splitScalar(u8, init_val, ',');
+                while (it.next()) |part| {
+                    const trimmed = std.mem.trim(u8, part, " \t");
+                    if (trimmed.len == 0) continue;
+                    const duped = self.allocator.dupe(u8, trimmed) catch {
+                        self.has_errors = true;
+                        return;
+                    };
+                    if (!appendValue(self, &values, duped)) return;
+                }
+            } else {
+                const duped = self.allocator.dupe(u8, init_val) catch {
+                    self.has_errors = true;
+                    return;
+                };
+                if (!appendValue(self, &values, duped)) return;
+            }
+        }
+
+        if (args) |arg_iter| {
+            while (values.items.len < arity.max) {
+                const next_arg = arg_iter.next() orelse break;
+                if (std.mem.startsWith(u8, next_arg, "-")) break;
+                const duped = self.allocator.dupe(u8, next_arg) catch {
+                    self.has_errors = true;
+                    return;
+                };
+                if (!appendValue(self, &values, duped)) return;
+            }
+        }
+
+        if (values.items.len < arity.min) {
+            std.log.err("Option --{s} requires at least {d} value(s), got {d}\n", .{ opt_name, arity.min, values.items.len });
+            self.has_errors = true;
+            self.print_help = true;
+            return;
+        }
+        if (values.items.len > arity.max) {
+            std.log.err("Option --{s} accepts at most {d} value(s), got {d}\n", .{ opt_name, arity.max, values.items.len });
+            self.has_errors = true;
+            self.print_help = true;
+            return;
+        }
+        if (values.items.len == 0 and arity.min == 0) return; // nothing to store
+
+        if (values.items.len == 1) {
+            // Transfer ownership of the single slice to context.
+            self.parse_result.?.context.options.put(opt_name, ParsedValue{ .value = values.items[0] }) catch {
+                self.has_errors = true;
+                return;
+            };
+            need_free = false; // context owns single slice
+        } else {
+            var combined = std.ArrayList(u8).empty;
+            defer combined.deinit(self.allocator);
+            for (values.items, 0..) |v, i| {
+                if (i > 0) combined.appendSlice(self.allocator, ",") catch {
+                    self.has_errors = true;
+                    return;
+                };
+                combined.appendSlice(self.allocator, v) catch {
+                    self.has_errors = true;
+                    return;
+                };
+            }
+            const final_slice = combined.toOwnedSlice(self.allocator) catch {
+                self.has_errors = true;
+                return;
+            };
+            self.parse_result.?.context.options.put(opt_name, ParsedValue{ .value = final_slice }) catch {
+                self.has_errors = true;
+                self.allocator.free(final_slice);
+                return;
+            };
+            // Free each individual slice now that we have the combined one.
+            for (values.items) |v| self.allocator.free(v);
+            need_free = false;
+        }
+    }
+
+    fn parseSinleShortOption(self: *Self, short_char: u8, value: ?[]const u8) void {
+        for (self.parse_result.?.command.options.items) |option_item| {
+            if (option_item.getShort()) |short| {
+                if (short == short_char) {
+                    if (option_item.getName()) |opt_name| {
+                        self.parseOptionValues(option_item, opt_name, value, null);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Recursively check parent commands
+        if (self.parse_result.?.command.parent) |parent_cmd| {
+            const original_command = self.parse_result.?.command;
+            self.parse_result.?.command = parent_cmd;
+            self.parseSinleShortOption(short_char, value);
+            self.parse_result.?.command = original_command;
+            return;
+        }
+
+        if (short_char == 'h') {
+            self.print_help = true;
+            return;
+        }
+
+        std.log.err("Unknown option -{c}\n", .{short_char});
+        self.has_errors = true;
+        self.print_help = true;
+    }
+
+    fn parseCommandOrPositional(self: *Self, arg: []const u8, positional_index: *usize) void {
+        // Try to match subcommands
+        for (self.parse_result.?.command.subcommands.items) |sub_cmd| {
+            if (std.mem.eql(u8, sub_cmd.name, arg)) {
+                self.parse_result.?.command = sub_cmd;
+                const new_context = action_context.ActionContext.init(self.allocator, self.parse_result.?.context) catch {
+                    self.has_errors = true;
+                    return;
+                };
+                self.parse_result.?.context = new_context;
+                // Reset positional index for the new subcommand
+                positional_index.* = 0;
+                return;
+            }
+        }
+        // If no subcommand matched, treat as positional argument
+        self.setPositionalArgumentByIndex(arg, positional_index);
+    }
+
+    fn setPositionalArgumentByIndex(self: *Self, arg: []const u8, positional_index: *usize) void {
+        if (positional_index.* >= self.parse_result.?.command.arguments.items.len) {
+            std.log.err("Unexpected positional argument: {s}\n", .{arg});
+            self.print_help = true;
+            self.has_errors = true;
+            return;
+        }
+
+        const arg_item = self.parse_result.?.command.arguments.items[positional_index.*];
+        const arg_name = arg_item.getName();
+
+        // Check if this argument already has values
+        const existing_values = self.parse_result.?.context.arguments.get(arg_name);
+        var current_count: usize = 0;
+
+        if (existing_values) |existing| {
+            // Count existing values by splitting on commas
+            const Iter = std.mem.SplitIterator(u8, .scalar);
+            var it = Iter{
+                .buffer = existing.value,
+                .index = 0,
+                .delimiter = ',',
+            };
+            while (it.next()) |_| {
+                current_count += 1;
+            }
+        }
+
+        const arity = arg_item.getArity();
+
+        // Check if we can accept another value
+        if (current_count >= arity.max) {
+            std.log.err("Argument {s} accepts at most {d} value(s), but got more\n", .{ arg_name, arity.max });
+            self.has_errors = true;
+            self.print_help = true;
+            return;
+        }
+
+        // Ensure we own the string by duplicating it
+        const owned_value = self.parse_result.?.context.allocator.dupe(u8, arg) catch {
+            self.has_errors = true;
+            return;
         };
-        defer self.allocator.free(help_text);
 
-        std.debug.print("{s}", .{help_text});
-        std.process.exit(1);
+        if (existing_values) |existing| {
+            // Append to existing values
+            const new_value = std.fmt.allocPrint(self.allocator, "{s},{s}", .{ existing.value, owned_value }) catch {
+                self.has_errors = true;
+                return;
+            };
+            self.allocator.free(owned_value); // Free the individual value since we're using it in concatenation
+            // Free the previous stored buffer (single or concatenated) being replaced
+            self.allocator.free(existing.value);
+
+            self.parse_result.?.context.arguments.put(
+                arg_name,
+                ParsedValue{
+                    .value = new_value,
+                },
+            ) catch {
+                self.has_errors = true;
+            };
+        } else {
+            // First value for this argument
+            self.parse_result.?.context.arguments.put(
+                arg_name,
+                ParsedValue{
+                    .value = owned_value,
+                },
+            ) catch {
+                self.has_errors = true;
+            };
+        }
+
+        // Only advance positional index if this argument has reached its maximum arity
+        if (current_count + 1 >= arity.max) {
+            positional_index.* += 1;
+        }
+    }
+
+    /// Set default values for options that weren't provided by the user
+    fn setDefaultValues(self: *Self) void {
+        if (self.parse_result == null) return;
+
+        // Set defaults for current command and all parent commands
+        var current_context = self.parse_result.?.context;
+        var current_command = self.parse_result.?.command;
+
+        while (true) {
+            // Set defaults for current command's options
+            for (current_command.options.items) |option_item| {
+                if (option_item.getName()) |opt_name| {
+                    // Check if this option was already set
+                    if (current_context.options.get(opt_name) == null) {
+                        // Option wasn't set, check if it has a default value
+                        const maybe_default = option_item.getDefaultValueAsString() catch null;
+                        if (maybe_default) |default_str| {
+                            // Set the default value
+                            current_context.options.put(opt_name, ParsedValue{
+                                .value = default_str,
+                            }) catch {
+                                self.has_errors = true;
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Move to parent command and context
+            if (current_command.parent) |parent_cmd| {
+                current_command = parent_cmd;
+                if (current_context.parent) |parent_ctx| {
+                    current_context = parent_ctx;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
     }
 };

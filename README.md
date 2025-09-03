@@ -1,16 +1,14 @@
 # cli-parser
 
-A flexible and type-safe command-line argument parser for Zig applications. Easily build CLI tools with support for commands, subcommands, options, flags, and arguments.
+A flexible and type-safe command-line argument parser for Zig applications. Build rich CLI tools with nested commands, typed options/arguments, flags, JSON-typed values, and defaults.
 
 ## Features
 
-- **Type-safe parsing**: Options and arguments are type-checked at compile time
-- **Subcommands**: Build complex CLI applications with nested command structures
-- **Flexible options**: Support for named options with short flags (`-i`, `--int`)
-- **Boolean flags**: Simple on/off switches with optional short names
-- **Arguments**: Positional arguments with type validation
-- **JSON parsing**: Parse complex struct types from command-line input
-- **Default values**: Set sensible defaults for options
+* Type-safe parsing (generic `Option(T)` / `Argument(T)` constructors)
+* Nested commands / subcommands with inherited context
+* Short & long options (`-i`, `--int`), boolean flags, positional arguments
+* JSON parsing for struct types (e.g. `--worker '{"name":"A","id":1}'`)
+* Arity support and default values (single or multiple)
 
 ## Usage
 
@@ -25,14 +23,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Create an integer option
-    var int_opt = try parser.Option(i32).init("An integer option", allocator);
-    defer int_opt.deinit();
-    _ = int_opt.withName("count")
+    // Integer option (single default value)
+    var count_opt = try parser.Option(i32).init("Number of repetitions", allocator);
+    defer count_opt.deinit();
+    _ = count_opt.withName("count")
         .withShort('c')
-        .withDefault(10);
+        .withDefaultValue(10);
 
-    // Create a string argument
+    // String argument (optional)
     var input_arg = try parser.Argument([]const u8).init("input", "Input file path", false, allocator);
     defer input_arg.deinit();
 
@@ -43,9 +41,9 @@ pub fn main() !void {
     // Define action function
     const action: parser.ActionFn = struct {
         fn call(context: parser.ActionContext) anyerror!void {
-            const count = context.getOption(i32, "count") orelse 10;
+            const count = context.getOption(i32, "count") catch 10; // default already set
             const verbose = context.getFlag("verbose");
-            const input = context.getArgument([]const u8, 0) orelse "no input";
+            const input = context.getArgument([]const u8, "input") catch "no input";
 
             std.debug.print("Processing {s} with count {d}\n", .{ input, count });
             if (verbose) {
@@ -59,17 +57,16 @@ pub fn main() !void {
     defer cmd.deinit();
 
     // Register components
-    _ = try cmd.withOption(i32, int_opt);
-    _ = try cmd.withArgument([]const u8, input_arg);
-    _ = try cmd.withFlag(verbose_flag);
-    _ = cmd.withAction(action);
+    _ = cmd.withOption(i32, count_opt)
+        .withArgument([]const u8, input_arg)
+        .withFlag(verbose_flag)
+        .withAction(action);
 
     // Parse and execute
     var cli_parser = parser.Parser.init(cmd, allocator);
-    var result = try cli_parser.parseWithContext();
-    defer result.context.deinit();
-
-    try result.command.execute(result.context);
+    defer cli_parser.deinit();
+    const result = try cli_parser.parse();
+    try result.command.invoke(result.context);
 }
 ```
 
@@ -80,18 +77,26 @@ pub fn main() !void {
 const main_cmd = try parser.Command.init("myapp", "My application", allocator);
 defer main_cmd.deinit();
 
-// Create subcommand
 const sub_cmd = try parser.Command.init("process", "Process data", allocator);
 defer sub_cmd.deinit();
 
-// Add options/flags to subcommand
-// ... (add options, arguments, flags, action)
+// Example option on subcommand
+var jobs_opt = try parser.Option(i32).init("Jobs to spawn", allocator);
+defer jobs_opt.deinit();
+_ = jobs_opt.withName("jobs").withShort('j').withDefaultValue(4);
 
-// Register subcommand
-_ = try main_cmd.withSubcommand(sub_cmd);
+_ = sub_cmd.withOption(i32, jobs_opt)
+    .withAction(struct {
+        fn call(ctx: parser.ActionContext) !void {
+            const jobs = ctx.getOption(i32, "jobs") catch 4;
+            std.debug.print("Processing with {d} jobs\n", .{jobs});
+        }
+    }.call);
+
+_ = main_cmd.withSubcommand(sub_cmd);
 ```
 
-### Complex Types
+### Complex Types (JSON)
 
 The parser supports parsing complex struct types from JSON:
 
@@ -108,7 +113,21 @@ _ = config_opt.withName("config").withShort('c');
 // Usage: myapp --config '{"host":"localhost","port":8080}'
 ```
 
-## How to Import
+### Multiple / Single Values & Arity
+
+Use `withArity` to change allowed counts. Example for an option that can take multiple integers:
+
+```zig
+var nums_opt = try parser.Option(i32).init("Numbers", allocator);
+defer nums_opt.deinit();
+_ = nums_opt.withName("num").withArity(.{ .min = 1, .max = 3 })
+    .withValues(&[_]i32{1,2}); // plural setter
+
+// For single-value only (arity max <= 1):
+_ = nums_opt.withArity(.zero_or_one).withValue(5); // singular setter
+```
+
+### How to Import
 
 Add cli-parser to your project using `zig fetch`:
 

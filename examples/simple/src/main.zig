@@ -18,7 +18,7 @@ pub fn main() !void {
     defer int_opt.deinit();
     _ = int_opt.withName("int")
         .withShort('i')
-        .withDefault(42);
+        .withDefaultValue(42);
 
     // Create arguments
     var str_arg = try Argument([]const u8).init("input", "A string argument", false, allocator);
@@ -32,9 +32,9 @@ pub fn main() !void {
     const action: ActionFn = struct {
         fn call(context: ActionContext) anyerror!void {
             // access options, flags, and arguments via ActionContext
-            const int_value = context.getOption(i32, "int") orelse 42;
+            const int_value = context.getOption(i32, "int") catch 42;
             const flag_value = context.getFlag("verbose");
-            const arg_value = context.getArgument([]const u8, "input") orelse "no input";
+            const arg_value = context.getArgument([]const u8, "input") catch "no input";
 
             std.debug.print("Command executed successfully\n", .{});
             std.debug.print("Integer option value: {d}\n", .{int_value});
@@ -48,18 +48,18 @@ pub fn main() !void {
     defer cmd.deinit();
 
     // Register options, arguments, flags, and action
-    _ = try cmd.withOption(i32, int_opt);
-    _ = try cmd.withArgument([]const u8, str_arg);
-    _ = try cmd.withFlag(flag);
-    _ = cmd.withAction(action);
+    _ = cmd.withOption(i32, int_opt)
+        .withArgument([]const u8, str_arg)
+        .withFlag(flag)
+        .withAction(action);
 
     // Create parser
     var parser = Parser.init(cmd, allocator);
+    defer parser.deinit();
 
     // Parse command line arguments and get both command and context
-    var result = try parser.parseWithContext();
-    defer result.context.deinit();
+    const result = try parser.parse();
 
     // Execute the command action with the populated context
-    try result.command.execute(result.context);
+    try result.command.invoke(result.context);
 }
