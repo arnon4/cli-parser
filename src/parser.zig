@@ -16,10 +16,14 @@ pub const Parser = struct {
 
     /// Result type for parse operations that include context
     pub const ParseResult = struct {
-        const This = @This();
         command: *command.Command,
         context: *ActionContext,
         allocator: Allocator,
+
+        /// Invoke the action associated with the parsed command
+        pub fn invoke(self: *ParseResult) anyerror!void {
+            return self.command.invoke(self.context);
+        }
     };
 
     root_command: *command.Command,

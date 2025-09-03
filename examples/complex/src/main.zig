@@ -103,5 +103,5 @@ pub fn main() !void {
     // Parse command line arguments and get both command and context
     const result = try parser.parse();
 
-    try result.command.invoke(result.context);
+    try result.invoke();
 }

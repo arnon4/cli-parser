@@ -66,7 +66,7 @@ pub fn main() !void {
     var cli_parser = parser.Parser.init(cmd, allocator);
     defer cli_parser.deinit();
     const result = try cli_parser.parse();
-    try result.command.invoke(result.context);
+    try result.invoke();
 }
 ```
 
@@ -121,10 +121,10 @@ Use `withArity` to change allowed counts. Example for an option that can take mu
 var nums_opt = try parser.Option(i32).init("Numbers", allocator);
 defer nums_opt.deinit();
 _ = nums_opt.withName("num").withArity(.{ .min = 1, .max = 3 })
-    .withValues(&[_]i32{1,2}); // plural setter
+    .withDefaultValues(&[_]i32{ 1, 2 }); // plural setter
 
 // For single-value only (arity max <= 1):
-_ = nums_opt.withArity(.zero_or_one).withValue(5); // singular setter
+_ = nums_opt.withArity(.zero_or_one).withDefaultValue(5); // singular setter
 ```
 
 ### How to Import

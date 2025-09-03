@@ -61,5 +61,5 @@ pub fn main() !void {
     const result = try parser.parse();
 
     // Execute the command action with the populated context
-    try result.command.invoke(result.context);
+    try result.invoke();
 }
