@@ -29,7 +29,7 @@ pub const ActionContext = struct {
     options: std.StringHashMap(ParsedValue),
     flags: std.StringHashMap(bool),
     arguments: std.StringHashMap(ParsedValue),
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
 
     pub const ParsedValue = struct {
         value: []const u8,
@@ -67,7 +67,7 @@ pub const ActionContext = struct {
         }
 
         /// Create a ParsedValue from a struct
-        pub fn fromStruct(comptime T: type, value: T, allocator: std.mem.Allocator) ActionError!ParsedValue {
+        pub fn fromStruct(comptime T: type, value: T, allocator: Allocator) ActionError!ParsedValue {
             const ptr = allocator.create(T) catch return ActionError.OutOfMemory;
             ptr.* = value;
 
@@ -80,7 +80,7 @@ pub const ActionContext = struct {
                         .alignment = @alignOf(T),
                     },
                     .deinit_fn = struct {
-                        fn deinit(ptr_opaque: *anyopaque, alloc: std.mem.Allocator) void {
+                        fn deinit(ptr_opaque: *anyopaque, alloc: Allocator) void {
                             const typed_ptr: *T = @ptrCast(@alignCast(ptr_opaque));
                             alloc.destroy(typed_ptr);
                         }
@@ -91,7 +91,7 @@ pub const ActionContext = struct {
     };
 
     /// Initialize the action context
-    pub fn init(allocator: std.mem.Allocator, parent: ?*Self) !*Self {
+    pub fn init(allocator: Allocator, parent: ?*Self) !*Self {
         const self = try allocator.create(ActionContext);
 
         if (parent) |p| {

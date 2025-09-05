@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
 
 /// Flag represents a boolean command-line flag
 pub const Flag = struct {
@@ -10,10 +11,10 @@ pub const Flag = struct {
     description: []const u8,
     default_value: bool,
     value: ?bool = null,
-    allocator: std.mem.Allocator,
+    allocator: Allocator,
 
     /// Initialize a flag
-    pub fn init(description: []const u8, default_value: bool, allocator: std.mem.Allocator) !*Self {
+    pub fn init(description: []const u8, default_value: bool, allocator: Allocator) !*Self {
         const flag = try allocator.create(Self);
         flag.* = Self{
             .description = description,

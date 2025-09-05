@@ -18,7 +18,7 @@ pub fn Option(comptime T: type) type {
         description: []const u8,
         default_value: ?ArrayList(T) = null,
         value: ?ArrayList(T) = null,
-        allocator: std.mem.Allocator,
+        allocator: Allocator,
         arity: Arity = Arity.zero_or_one,
 
         /// Initialize an option
@@ -113,7 +113,7 @@ pub fn Option(comptime T: type) type {
             return self.description;
         }
 
-        /// Get the default value as a string, returns null if no default is set
+        /// Get the default value as a string, returns `null` if no default is set.
         /// Caller owns the returned memory and must free both the individual strings and the array
         pub fn getDefaultValueAsString(self: *const Self) !?[][]u8 {
             if (self.default_value) |default| {
@@ -186,7 +186,7 @@ pub fn Option(comptime T: type) type {
 }
 
 /// Convert any typed value to its string representation
-fn valueToString(comptime T: type, value: T, allocator: std.mem.Allocator) ![]u8 {
+fn valueToString(comptime T: type, value: T, allocator: Allocator) ![]u8 {
     const type_info = @typeInfo(T);
     return switch (type_info) {
         .bool => try allocator.dupe(u8, if (value) "true" else "false"),
@@ -252,7 +252,7 @@ fn parseEnum(comptime EnumType: type, str_value: []const u8) !EnumType {
 }
 
 /// Parse a JSON string into the specified struct type
-fn parseStruct(comptime StructType: type, str_value: []const u8, allocator: std.mem.Allocator) !StructType {
+fn parseStruct(comptime StructType: type, str_value: []const u8, allocator: Allocator) !StructType {
     const type_info = @typeInfo(StructType);
     if (type_info != .@"struct") {
         @compileError("parseStruct only works with struct types");
@@ -301,7 +301,7 @@ pub fn parseValueFromString(comptime T: type, str_value: []const u8) !T {
 }
 
 /// Parse a string value into the specified type with allocator support for dynamic types
-pub fn parseValueFromStringWithAllocator(comptime T: type, str_value: []const u8, allocator: std.mem.Allocator) !T {
+pub fn parseValueFromStringWithAllocator(comptime T: type, str_value: []const u8, allocator: Allocator) !T {
     const type_info = @typeInfo(T);
     return switch (type_info) {
         .bool => std.mem.eql(u8, str_value, "true") or std.mem.eql(u8, str_value, "1"),
@@ -381,7 +381,7 @@ pub const OptionInterface = struct {
                     }
                 }.getDefaultValueAsString,
                 .getValueAsString = struct {
-                    fn getValueAsString(ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!?[][]u8 {
+                    fn getValueAsString(ptr: *anyopaque, allocator: Allocator) anyerror!?[][]u8 {
                         const self: *T = @ptrCast(@alignCast(ptr));
                         const values = self.getValue() catch return null;
 
@@ -474,7 +474,7 @@ pub const OptionInterface = struct {
 
     /// Get the value of the option as an array of strings, returns null if no value is set
     /// Caller owns the returned memory and must free both the individual strings and the array
-    pub fn getValueAsString(self: Self, allocator: std.mem.Allocator) !?[][]u8 {
+    pub fn getValueAsString(self: Self, allocator: Allocator) !?[][]u8 {
         return self.vtable.getValueAsString(self.ptr, allocator);
     }
 
