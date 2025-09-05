@@ -4,8 +4,8 @@ const std = @import("std");
 pub const Arity = struct {
     const Self = @This();
 
-    min: u8,
-    max: u8,
+    min: usize,
+    max: usize,
 
     /// An arity that allows zero values.
     pub const zero = Self{
@@ -32,7 +32,7 @@ pub const Arity = struct {
         .min = 1,
         .max = std.math.maxInt(u8),
     };
-    /// An arity that allows many values (up to the maximum of u8).
+    /// An arity that allows many values (up to the maximum of `usize`).
     pub const many = Self{
         .min = std.math.maxInt(u8),
         .max = std.math.maxInt(u8),
