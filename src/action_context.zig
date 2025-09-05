@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 const ActionError = error{
     InvalidType,
     OptionNotFound,
@@ -32,61 +33,27 @@ pub const ActionContext = struct {
     allocator: Allocator,
 
     pub const ParsedValue = struct {
-        value: []const u8,
+        value: ArrayList([]const u8) = .empty,
 
-        pub const StructData = struct {
-            ptr: *anyopaque,
-            type_info: TypeInfo,
-            deinit_fn: ?*const fn (ptr: *anyopaque, allocator: Allocator) void,
-        };
-
-        pub const TypeInfo = struct {
-            name: []const u8,
-            size: usize,
-            alignment: u29,
-        };
-
-        pub fn asString(self: ParsedValue) []const u8 {
-            return self.value;
+        pub fn asString(self: ParsedValue, index: usize) []const u8 {
+            std.debug.assert(index < self.value.items.len);
+            return self.value.items[index];
         }
 
-        pub fn asInt(self: ParsedValue, comptime T: type) ActionError!T {
-            return try std.fmt.parseInt(T, self.value, 10);
+        pub fn asInt(self: ParsedValue, comptime T: type, index: usize) ActionError!T {
+            return try std.fmt.parseInt(T, self.value.items[index], 10);
         }
 
-        pub fn asFloat(self: ParsedValue, comptime T: type) ActionError!T {
-            return try std.fmt.parseFloat(T, self.value);
+        pub fn asFloat(self: ParsedValue, comptime T: type, index: usize) ActionError!T {
+            return try std.fmt.parseFloat(T, self.value.items[index]);
         }
 
-        pub fn asBool(self: ParsedValue) bool {
-            return std.mem.eql(u8, self.value, "true") or std.mem.eql(u8, self.value, "1");
+        pub fn asBool(self: ParsedValue, index: usize) bool {
+            return std.mem.eql(u8, self.value.items[index], "true") or std.mem.eql(u8, self.value.items[index], "1");
         }
 
-        pub fn asStruct(self: ParsedValue, comptime T: type, allocator: Allocator) ActionError!std.json.Parsed(T) {
-            return try std.json.parseFromSlice(T, allocator, self.value, .{});
-        }
-
-        /// Create a ParsedValue from a struct
-        pub fn fromStruct(comptime T: type, value: T, allocator: Allocator) ActionError!ParsedValue {
-            const ptr = allocator.create(T) catch return ActionError.OutOfMemory;
-            ptr.* = value;
-
-            return ParsedValue{
-                .struct_data = StructData{
-                    .ptr = ptr,
-                    .type_info = TypeInfo{
-                        .name = @typeName(T),
-                        .size = @sizeOf(T),
-                        .alignment = @alignOf(T),
-                    },
-                    .deinit_fn = struct {
-                        fn deinit(ptr_opaque: *anyopaque, alloc: Allocator) void {
-                            const typed_ptr: *T = @ptrCast(@alignCast(ptr_opaque));
-                            alloc.destroy(typed_ptr);
-                        }
-                    }.deinit,
-                },
-            };
+        pub fn asStruct(self: ParsedValue, comptime T: type, allocator: Allocator, index: usize) ActionError!std.json.Parsed(T) {
+            return try std.json.parseFromSlice(T, allocator, self.value.items[index], .{});
         }
     };
 
@@ -112,10 +79,11 @@ pub const ActionContext = struct {
 
     /// Deinitialize the context
     pub fn deinit(self: *Self) void {
-        // Free all owned strings in options
+        // Free all owned strings in options (each entry is an ArrayList of slices)
         var option_iter = self.options.iterator();
         while (option_iter.next()) |entry| {
-            self.allocator.free(entry.value_ptr.*.value);
+            for (entry.value_ptr.*.value.items) |s| self.allocator.free(s);
+            entry.value_ptr.*.value.deinit(self.allocator);
         }
         self.options.deinit();
 
@@ -124,7 +92,8 @@ pub const ActionContext = struct {
         // Free all owned strings in arguments
         var arg_iter = self.arguments.iterator();
         while (arg_iter.next()) |entry| {
-            self.allocator.free(entry.value_ptr.*.value);
+            for (entry.value_ptr.*.value.items) |s| self.allocator.free(s);
+            entry.value_ptr.*.value.deinit(self.allocator);
         }
         self.arguments.deinit();
 
@@ -136,39 +105,39 @@ pub const ActionContext = struct {
         }
     }
 
-    /// Set an option value
+    /// Set an option value.
     pub fn setOption(self: *Self, name: []const u8, value: ParsedValue) !void {
         try self.options.put(name, value);
     }
 
-    /// Set a flag value
+    /// Set a flag value.
     pub fn setFlag(self: *Self, name: []const u8, value: bool) !void {
         try self.flags.put(name, value);
     }
 
-    /// Set an argument value
+    /// Set an argument value.
     pub fn setArgument(self: *Self, name: []const u8, value: ParsedValue) !void {
         try self.arguments.put(name, value);
     }
 
-    /// Get an option value by name and type
+    /// Get an option value by name and type. If the option has multiple values, the first one is returned.
     pub fn getOption(self: *const Self, comptime T: type, name: []const u8) !T {
         if (self.options.get(name)) |value| {
             const requested_type = @typeInfo(T);
             switch (requested_type) {
-                .int => return value.asInt(T),
-                .float => return value.asFloat(T),
-                .bool => return value.asBool(),
+                .int => return value.asInt(T, 0),
+                .float => return value.asFloat(T, 0),
+                .bool => return value.asBool(0),
                 .pointer => |ptr_info| {
                     if (ptr_info.size == .slice and ptr_info.child == u8) {
-                        return value.asString();
+                        return value.asString(0);
                     } else {
                         return ActionError.InvalidType;
                     }
                 },
-                .array => return value.asString(),
+                .array => return value.asString(0),
                 .@"struct" => {
-                    const parsed = try value.asStruct(T, self.allocator);
+                    const parsed = try value.asStruct(T, self.allocator, 0);
                     defer parsed.deinit();
                     return parsed.value;
                 },
@@ -180,7 +149,55 @@ pub const ActionContext = struct {
         return ActionError.OptionNotFound;
     }
 
-    /// Get a flag value by name
+    /// Get an option value by name and type.
+    fn getOptionByIndex(self: *const Self, comptime T: type, name: []const u8, index: usize) !T {
+        if (self.options.get(name)) |value| {
+            const requested_type = @typeInfo(T);
+            switch (requested_type) {
+                .int => return value.asInt(T, index),
+                .float => return value.asFloat(T, index),
+                .bool => return value.asBool(index),
+                .pointer => |ptr_info| {
+                    if (ptr_info.size == .slice and ptr_info.child == u8) {
+                        return value.asString(index);
+                    } else {
+                        return ActionError.InvalidType;
+                    }
+                },
+                .array => return value.asString(index),
+                .@"struct" => {
+                    const parsed = try value.asStruct(T, self.allocator, index);
+                    defer parsed.deinit();
+                    return parsed.value;
+                },
+                else => return ActionError.InvalidType,
+            }
+        } else if (self.parent) |parent| {
+            return parent.getOption(T, name);
+        }
+        return ActionError.OptionNotFound;
+    }
+
+    pub fn getOptions(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !void {
+        if (self.options.get(name)) |value| {
+            std.debug.assert(buffer.len >= value.value.items.len);
+
+            for (value.value.items, 0..) |_, i| {
+                const parsed_opt = try self.getOptionByIndex(T, name, i);
+                buffer[i] = parsed_opt;
+            }
+
+            return;
+        }
+
+        if (self.parent) |parent| {
+            return parent.getOptions(T, name, buffer);
+        }
+
+        return ActionError.OptionNotFound;
+    }
+
+    /// Get a flag value by name.
     pub fn getFlag(self: *const Self, name: []const u8) bool {
         if (self.flags.get(name)) |value| {
             return value;
@@ -191,24 +208,24 @@ pub const ActionContext = struct {
         return false;
     }
 
-    /// Get an argument value by name and type
-    pub fn getArgument(self: *const Self, comptime T: type, name: []const u8) ActionError!T {
+    /// Get an argument value by name and type. If the argument has multiple values, the first one is returned.
+    pub fn getArgument(self: *const Self, comptime T: type, name: []const u8) !T {
         if (self.arguments.get(name)) |value| {
             const requested_type = @typeInfo(T);
             switch (requested_type) {
-                .int => return value.asInt(T),
-                .float => return value.asFloat(T),
-                .bool => return value.asBool(),
+                .int => return value.asInt(T, 0),
+                .float => return value.asFloat(T, 0),
+                .bool => return value.asBool(0),
                 .pointer => |ptr_info| {
                     if (ptr_info.size == .slice and ptr_info.child == u8) {
-                        return value.asString();
+                        return value.asString(0);
                     } else {
                         return ActionError.InvalidType;
                     }
                 },
-                .array => return value.asString(),
+                .array => return value.asString(0),
                 .@"struct" => {
-                    const parsed = try value.asStruct(T, self.allocator);
+                    const parsed = try value.asStruct(T, self.allocator, 0);
                     defer parsed.deinit();
                     return parsed.value;
                 },
@@ -217,6 +234,57 @@ pub const ActionContext = struct {
         } else if (self.parent) |parent| {
             return parent.getArgument(T, name);
         }
+
+        return ActionError.ArgumentNotFound;
+    }
+
+    /// Get an argument value by name and type.
+    fn getArgumentByIndex(self: *const Self, comptime T: type, name: []const u8, index: usize) !T {
+        if (self.arguments.get(name)) |value| {
+            const requested_type = @typeInfo(T);
+            switch (requested_type) {
+                .int => return value.asInt(T, index),
+                .float => return value.asFloat(T, index),
+                .bool => return value.asBool(index),
+                .pointer => |ptr_info| {
+                    if (ptr_info.size == .slice and ptr_info.child == u8) {
+                        return value.asString(index);
+                    } else {
+                        return ActionError.InvalidType;
+                    }
+                },
+                .array => return value.asString(index),
+                .@"struct" => {
+                    const parsed = try value.asStruct(T, self.allocator, index);
+                    defer parsed.deinit();
+                    return parsed.value;
+                },
+                else => return ActionError.InvalidType,
+            }
+        } else if (self.parent) |parent| {
+            return parent.getArgument(T, name);
+        }
+
+        return ActionError.ArgumentNotFound;
+    }
+
+    /// Get all argument values by name and type.
+    pub fn getArguments(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !void {
+        if (self.arguments.get(name)) |value| {
+            std.debug.assert(buffer.len >= value.value.items.len);
+
+            for (value.value.items, 0..) |_, i| {
+                const parsed_arg = try self.getArgumentByIndex(T, name, i);
+                buffer[i] = parsed_arg;
+            }
+
+            return;
+        }
+
+        if (self.parent) |parent| {
+            return parent.getArguments(T, name, buffer);
+        }
+
         return ActionError.ArgumentNotFound;
     }
 };

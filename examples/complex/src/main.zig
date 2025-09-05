@@ -36,6 +36,10 @@ pub fn main() !void {
 
     // Create a struct argument for testing JSON parsing
     var struct_arg = try Argument(worker_struct).init("worker_arg", "A worker struct argument", true, allocator);
+    _ = struct_arg.withArity(.{
+        .min = 1,
+        .max = 2,
+    });
     defer struct_arg.deinit();
 
     // Create flags
@@ -70,9 +74,20 @@ pub fn main() !void {
                 try out.print("Input argument: {s}\n", .{input_value.?});
             }
 
-            // Get the struct argument (by name, JSON struct)
-            const worker_arg: worker_struct = context.getArgument(worker_struct, "worker_arg") catch unreachable; // Required, so present or help shown
-            try out.print("Worker from argument: name={s}, id={d}\n", .{ worker_arg.name, worker_arg.id });
+            // Get the struct arguments (by name, JSON struct)
+            var worker_args_buffer: [2]worker_struct = undefined; // Max arity is 2
+            context.getArguments(worker_struct, "worker_arg", &worker_args_buffer) catch {
+                std.debug.print("Error getting worker arguments\n", .{});
+                std.process.exit(1);
+            };
+
+            if (worker_args_buffer.len == 0) {
+                try out.print("No worker_arg arguments provided.\n", .{});
+            } else {
+                for (worker_args_buffer, 0..) |w, i| {
+                    try out.print("Worker_arg[{d}]: name={s}, id={d}\n", .{ i, w.name, w.id });
+                }
+            }
 
             try out.print("Action completed successfully!\n", .{});
             try out.flush();

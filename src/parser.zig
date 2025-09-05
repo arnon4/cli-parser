@@ -66,29 +66,14 @@ pub const Parser = struct {
 
                 var value_count: usize = 0;
                 if (maybe_value) |value| {
-                    // Count values by splitting on commas
-                    const Iter = std.mem.SplitIterator(u8, .scalar);
-                    var it = Iter{
-                        .buffer = value.value,
-                        .index = 0,
-                        .delimiter = ',',
-                    };
-                    while (it.next()) |_| {
-                        value_count += 1;
-                    }
+                    value_count = value.value.items.len;
                 }
 
                 if (value_count < arity.min) {
-                    var writer = std.fs.File.stderr().writer(&.{});
-                    const err = &writer.interface;
                     if (arg.isRequired()) {
-                        err.print("Missing required positional argument: {s} (needs at least {d} value(s))\n", .{ arg_name, arity.min }) catch {
-                            std.log.err("Fatal error occurred", .{});
-                        };
+                        std.log.err("Missing required positional argument: {s} (needs at least {d} value(s))\n", .{ arg_name, arity.min });
                     } else {
-                        err.print("Argument {s} needs at least {d} value(s), got {d}\n", .{ arg_name, arity.min, value_count }) catch {
-                            std.log.err("Fatal error occurred", .{});
-                        };
+                        std.log.err("Argument {s} needs at least {d} value(s), got {d}\n", .{ arg_name, arity.min, value_count });
                     }
                     self.print_help = true;
                     self.has_errors = true;
@@ -294,106 +279,82 @@ pub const Parser = struct {
     fn parseOptionValues(self: *Self, option_item: anytype, opt_name: []const u8, initial_value: ?[]const u8, args: ?*ArgIterator) void {
         const arity = option_item.getArity();
 
-        // Gather all raw string values as individually allocated slices.
-        var values = std.ArrayList([]const u8).empty;
-        var need_free = true;
+        // Collect individual values (each owned slice) directly into an ArrayList.
+        var list = std.ArrayList([]const u8).empty;
+        var transferred = false;
         defer {
-            if (need_free) {
-                for (values.items) |v| self.allocator.free(v);
+            if (!transferred) {
+                for (list.items) |v| self.allocator.free(v);
+                list.deinit(self.allocator);
             }
-            values.deinit(self.allocator);
         }
-
-        const appendValue = struct {
-            fn append(self_parser: *Self, list: *std.ArrayList([]const u8), slice: []const u8) bool {
-                list.append(self_parser.allocator, slice) catch {
-                    self_parser.has_errors = true;
-                    return false;
-                };
-                return true;
-            }
-        }.append;
 
         if (initial_value) |init_val| {
             if (std.mem.indexOf(u8, init_val, ",")) |_| {
                 var it = std.mem.splitScalar(u8, init_val, ',');
                 while (it.next()) |part| {
                     const trimmed = std.mem.trim(u8, part, " \t");
-                    if (trimmed.len == 0) continue;
+                    if (trimmed.len == 0) {
+                        continue;
+                    }
                     const duped = self.allocator.dupe(u8, trimmed) catch {
                         self.has_errors = true;
                         return;
                     };
-                    if (!appendValue(self, &values, duped)) return;
+                    list.append(self.allocator, duped) catch {
+                        self.has_errors = true;
+                        return;
+                    };
                 }
             } else {
                 const duped = self.allocator.dupe(u8, init_val) catch {
                     self.has_errors = true;
                     return;
                 };
-                if (!appendValue(self, &values, duped)) return;
+                list.append(self.allocator, duped) catch {
+                    self.has_errors = true;
+                    return;
+                };
             }
         }
 
         if (args) |arg_iter| {
-            while (values.items.len < arity.max) {
+            while (list.items.len < arity.max) {
                 const next_arg = arg_iter.next() orelse break;
-                if (std.mem.startsWith(u8, next_arg, "-")) break;
+                if (std.mem.startsWith(u8, next_arg, "-")) {
+                    break; // next option/flag begins
+                }
                 const duped = self.allocator.dupe(u8, next_arg) catch {
                     self.has_errors = true;
                     return;
                 };
-                if (!appendValue(self, &values, duped)) return;
-            }
-        }
-
-        if (values.items.len < arity.min) {
-            std.log.err("Option --{s} requires at least {d} value(s), got {d}\n", .{ opt_name, arity.min, values.items.len });
-            self.has_errors = true;
-            self.print_help = true;
-            return;
-        }
-        if (values.items.len > arity.max) {
-            std.log.err("Option --{s} accepts at most {d} value(s), got {d}\n", .{ opt_name, arity.max, values.items.len });
-            self.has_errors = true;
-            self.print_help = true;
-            return;
-        }
-        if (values.items.len == 0 and arity.min == 0) return; // nothing to store
-
-        if (values.items.len == 1) {
-            // Transfer ownership of the single slice to context.
-            self.parse_result.?.context.options.put(opt_name, ParsedValue{ .value = values.items[0] }) catch {
-                self.has_errors = true;
-                return;
-            };
-            need_free = false; // context owns single slice
-        } else {
-            var combined = std.ArrayList(u8).empty;
-            defer combined.deinit(self.allocator);
-            for (values.items, 0..) |v, i| {
-                if (i > 0) combined.appendSlice(self.allocator, ",") catch {
-                    self.has_errors = true;
-                    return;
-                };
-                combined.appendSlice(self.allocator, v) catch {
+                list.append(self.allocator, duped) catch {
                     self.has_errors = true;
                     return;
                 };
             }
-            const final_slice = combined.toOwnedSlice(self.allocator) catch {
-                self.has_errors = true;
-                return;
-            };
-            self.parse_result.?.context.options.put(opt_name, ParsedValue{ .value = final_slice }) catch {
-                self.has_errors = true;
-                self.allocator.free(final_slice);
-                return;
-            };
-            // Free each individual slice now that we have the combined one.
-            for (values.items) |v| self.allocator.free(v);
-            need_free = false;
         }
+
+        if (list.items.len < arity.min) {
+            std.log.err("Option --{s} requires at least {d} value(s), got {d}\n", .{ opt_name, arity.min, list.items.len });
+            self.has_errors = true;
+            self.print_help = true;
+            return;
+        }
+        if (list.items.len > arity.max) {
+            std.log.err("Option --{s} accepts at most {d} value(s), got {d}\n", .{ opt_name, arity.max, list.items.len });
+            self.has_errors = true;
+            self.print_help = true;
+            return;
+        }
+        if (list.items.len == 0 and arity.min == 0) return; // optional and not provided
+
+        // Transfer ownership of the list (and its slices) into the context.
+        self.parse_result.?.context.options.put(opt_name, ParsedValue{ .value = list }) catch {
+            self.has_errors = true;
+            return;
+        };
+        transferred = true;
     }
 
     fn parseSinleShortOption(self: *Self, short_char: u8, value: ?[]const u8) void {
@@ -458,20 +419,11 @@ pub const Parser = struct {
         const arg_name = arg_item.getName();
 
         // Check if this argument already has values
-        const existing_values = self.parse_result.?.context.arguments.get(arg_name);
+        const existing_values = self.parse_result.?.context.arguments.getPtr(arg_name);
         var current_count: usize = 0;
 
         if (existing_values) |existing| {
-            // Count existing values by splitting on commas
-            const Iter = std.mem.SplitIterator(u8, .scalar);
-            var it = Iter{
-                .buffer = existing.value,
-                .index = 0,
-                .delimiter = ',',
-            };
-            while (it.next()) |_| {
-                current_count += 1;
-            }
+            current_count = existing.value.items.len;
         }
 
         const arity = arg_item.getArity();
@@ -491,32 +443,22 @@ pub const Parser = struct {
         };
 
         if (existing_values) |existing| {
-            // Append to existing values
-            const new_value = std.fmt.allocPrint(self.allocator, "{s},{s}", .{ existing.value, owned_value }) catch {
+            existing.value.append(self.parse_result.?.context.allocator, owned_value) catch {
+                self.has_errors = true;
+                self.parse_result.?.context.allocator.free(owned_value);
+                return;
+            };
+        } else {
+            var list = std.ArrayList([]const u8).empty;
+            list.append(self.parse_result.?.context.allocator, owned_value) catch {
+                self.parse_result.?.context.allocator.free(owned_value);
                 self.has_errors = true;
                 return;
             };
-            self.allocator.free(owned_value); // Free the individual value since we're using it in concatenation
-            // Free the previous stored buffer (single or concatenated) being replaced
-            self.allocator.free(existing.value);
-
-            self.parse_result.?.context.arguments.put(
-                arg_name,
-                ParsedValue{
-                    .value = new_value,
-                },
-            ) catch {
+            self.parse_result.?.context.arguments.put(arg_name, ParsedValue{ .value = list }) catch {
                 self.has_errors = true;
-            };
-        } else {
-            // First value for this argument
-            self.parse_result.?.context.arguments.put(
-                arg_name,
-                ParsedValue{
-                    .value = owned_value,
-                },
-            ) catch {
-                self.has_errors = true;
+                for (list.items) |v| self.parse_result.?.context.allocator.free(v);
+                list.deinit(self.parse_result.?.context.allocator);
             };
         }
 
@@ -528,7 +470,9 @@ pub const Parser = struct {
 
     /// Set default values for options that weren't provided by the user
     fn setDefaultValues(self: *Self) void {
-        if (self.parse_result == null) return;
+        if (self.parse_result == null) {
+            return;
+        }
 
         // Set defaults for current command and all parent commands
         var current_context = self.parse_result.?.context;
@@ -542,13 +486,53 @@ pub const Parser = struct {
                     if (current_context.options.get(opt_name) == null) {
                         // Option wasn't set, check if it has a default value
                         const maybe_default = option_item.getDefaultValueAsString() catch null;
-                        if (maybe_default) |default_str| {
-                            // Set the default value
-                            current_context.options.put(opt_name, ParsedValue{
-                                .value = default_str,
-                            }) catch {
-                                self.has_errors = true;
-                            };
+                        if (maybe_default) |defaults| {
+                            var list = std.ArrayList([]const u8).empty;
+                            const T = @TypeOf(defaults);
+                            switch (@typeInfo(T)) {
+                                .pointer => |pinfo| if (pinfo.child == u8) {
+                                    // Single string default; split on commas
+                                    var it = std.mem.splitScalar(u8, defaults, ',');
+                                    while (it.next()) |part| {
+                                        const trimmed = std.mem.trim(u8, part, " \t");
+                                        if (trimmed.len == 0) continue;
+                                        const duped = self.allocator.dupe(u8, trimmed) catch {
+                                            self.has_errors = true;
+                                            break;
+                                        };
+                                        list.append(self.allocator, duped) catch {
+                                            self.has_errors = true;
+                                            break;
+                                        };
+                                    }
+                                    self.allocator.free(defaults); // free original combined string
+                                } else {
+                                    // Treat as array-of-slices pointer
+                                    for (defaults) |d| {
+                                        const duped = self.allocator.dupe(u8, d) catch {
+                                            self.has_errors = true;
+                                            break;
+                                        };
+                                        list.append(self.allocator, duped) catch {
+                                            self.has_errors = true;
+                                            break;
+                                        };
+                                    }
+                                    // free container
+                                    self.allocator.free(defaults);
+                                },
+                                else => {},
+                            }
+                            if (list.items.len > 0) {
+                                current_context.options.put(opt_name, ParsedValue{ .value = list }) catch {
+                                    self.has_errors = true;
+                                    for (list.items) |s| self.allocator.free(s);
+                                    list.deinit(self.allocator);
+                                };
+                            } else {
+                                for (list.items) |s| self.allocator.free(s);
+                                list.deinit(self.allocator);
+                            }
                         }
                     }
                 }
