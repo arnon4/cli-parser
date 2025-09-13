@@ -184,7 +184,7 @@ pub fn main() !void {
         .withAction(action);
 
     var parser = Parser(.{
-        .allow_unknown_options = false,
+        .allow_unknown_options = true,
         .double_hyphen_delimiter = true,
         .allow_options_after_args = false,
     }).init(cmd, allocator);
