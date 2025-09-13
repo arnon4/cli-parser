@@ -9,13 +9,12 @@ const Option = @import("parser").Option;
 const Parser = @import("parser").Parser;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // Create options
     var int_opt = try Option(i32).init("An integer option", allocator);
-    defer int_opt.deinit();
     _ = int_opt.withName("int")
         .withShort('i')
         .withDefaultValue(42);
@@ -26,13 +25,11 @@ pub fn main() !void {
     };
 
     var worker_opt = try Option(worker_struct).init("Worker option", allocator);
-    defer worker_opt.deinit();
     _ = worker_opt.withName("worker")
         .withShort('w');
 
     // Create arguments
-    var str_arg = try Argument([]const u8).init("input", "A string argument", false, allocator);
-    defer str_arg.deinit();
+    const str_arg = try Argument([]const u8).init("input", "A string argument", false, allocator);
 
     // Create a struct argument for testing JSON parsing
     var struct_arg = try Argument(worker_struct).init("worker_arg", "A worker struct argument", true, allocator);
@@ -40,7 +37,6 @@ pub fn main() !void {
         .min = 1,
         .max = 2,
     });
-    defer struct_arg.deinit();
 
     // Create flags
     var flag = try Flag.init("Enable verbose output", false, allocator);
@@ -96,11 +92,9 @@ pub fn main() !void {
 
     // Create command
     const cmd = try Command.init("demo", "A demo command", allocator);
-    defer cmd.deinit();
 
     // Create subcommand
     const sub_cmd = try Command.init("sub", "A subcommand", allocator);
-    defer sub_cmd.deinit();
 
     // Register options, arguments, flags, and action
     _ = sub_cmd.withOption(worker_struct, worker_opt)
@@ -113,8 +107,12 @@ pub fn main() !void {
         .withSubcommand(sub_cmd); // Register the subcommand
 
     // Create parser
-    var parser = Parser.init(cmd, allocator);
-    defer parser.deinit();
+    var parser = Parser(.{
+        // default configuration
+        .allow_unknown_options = false,
+        .double_hyphen_delimiter = true,
+        .allow_options_after_args = true,
+    }).init(cmd, allocator);
     // Parse command line arguments and get both command and context
     const result = try parser.parse();
 

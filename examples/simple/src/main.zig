@@ -54,7 +54,7 @@ pub fn main() !void {
         .withAction(action);
 
     // Create parser
-    var parser = Parser.init(cmd, allocator);
+    var parser = Parser(.{}).init(cmd, allocator);
     defer parser.deinit();
 
     // Parse command line arguments and get both command and context
