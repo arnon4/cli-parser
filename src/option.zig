@@ -5,29 +5,30 @@ const ArrayList = std.ArrayList;
 
 const ActionContext = @import("action_context.zig").ActionContext;
 const Arity = @import("arity.zig").Arity;
+const OptConfig = @import("opt_config.zig");
 const ExitCode = @import("exit_code.zig").ExitCode;
 const exit = @import("exit_code.zig").exit;
 
 /// Generic Option constructor function
-pub fn Option(comptime T: type) type {
+pub fn Option(comptime config: OptConfig) type {
     return struct {
         const Self = @This();
 
-        name: ?[]const u8 = null,
-        short: ?u8 = null,
-        description: []const u8,
-        default_value: ?ArrayList(T) = null,
-        value: ?ArrayList(T) = null,
-        allocator: Allocator,
+        /// The arity of the option (min/max number of values).
         arity: Arity = Arity.zero_or_one,
+        /// The default value(s) for the argument (if any).
+        default_value: ?ArrayList(config.type) = null,
+        /// The current value(s) for the argument (if any).
+        value: ?ArrayList(config.type) = null,
+        allocator: Allocator,
 
         /// Initialize an option
-        pub fn init(description: []const u8, allocator: Allocator) !*Self {
+        pub fn init(allocator: Allocator) !*Self {
             const option = try allocator.create(Self);
             option.* = Self{
-                .description = description,
                 .allocator = allocator,
             };
+
             return option;
         }
 
@@ -42,27 +43,15 @@ pub fn Option(comptime T: type) type {
             self.allocator.destroy(self);
         }
 
-        /// Set the long name for the option (e.g., "verbose")
-        pub fn withName(self: *Self, name: []const u8) *Self {
-            self.name = name;
-            return self;
-        }
-
-        /// Set the short name for the option (e.g., 'v')
-        pub fn withShort(self: *Self, short: u8) *Self {
-            self.short = short;
-            return self;
-        }
-
         /// Set the default values for the option
-        pub fn withDefaultValues(self: *Self, default_values: []const T) *Self {
+        pub fn withDefaultValues(self: *Self, default_values: []const config.type) *Self {
             if (self.default_value != null) {
                 @panic("Default value already set");
             }
             if (default_values.len < self.arity.min or default_values.len > self.arity.max) {
                 @panic("Value length does not meet option arity requirements");
             }
-            self.default_value = ArrayList(T).empty;
+            self.default_value = ArrayList(config.type).empty;
             self.default_value.?.appendSlice(self.allocator, default_values) catch {
                 std.log.err("OutOfMemory when setting default value for option\n", .{});
                 exit(ExitCode.OutOfMemory);
@@ -71,22 +60,22 @@ pub fn Option(comptime T: type) type {
         }
 
         /// Convenience: set a single default value (only if arity allows at most 1)
-        pub fn withDefaultValue(self: *Self, value: T) *Self {
+        pub fn withDefaultValue(self: *Self, value: config.type) *Self {
             if (self.arity.max > 1) @panic("withDefaultValue only valid when arity max <= 1");
-            var buf: [1]T = undefined;
+            var buf: [1]config.type = undefined;
             buf[0] = value;
             return self.withDefaultValues(buf[0..1]);
         }
 
         /// Set the current values for the option
-        pub fn withValues(self: *Self, values: []const T) *Self {
+        pub fn withValues(self: *Self, values: []const config.type) *Self {
             if (self.value != null) {
                 @panic("Value already set");
             }
             if (values.len < self.arity.min or values.len > self.arity.max) {
                 @panic("Value length does not meet option arity requirements");
             }
-            self.value = ArrayList(T).empty;
+            self.value = ArrayList(config.type).empty;
             self.value.?.appendSlice(self.allocator, values) catch {
                 std.log.err("OutOfMemory when setting value for option\n", .{});
                 exit(ExitCode.OutOfMemory);
@@ -95,9 +84,9 @@ pub fn Option(comptime T: type) type {
         }
 
         /// Convenience: set a single value (only if arity allows at most 1)
-        pub fn withValue(self: *Self, value: T) *Self {
+        pub fn withValue(self: *Self, value: config.type) *Self {
             if (self.arity.max > 1) @panic("withValue (singular) only valid when arity max <= 1");
-            var buf: [1]T = undefined;
+            var buf: [1]config.type = undefined;
             buf[0] = value;
             return self.withValues(buf[0..1]);
         }
@@ -110,7 +99,8 @@ pub fn Option(comptime T: type) type {
 
         /// Get the description of the option
         pub fn getDescription(self: *const Self) []const u8 {
-            return self.description;
+            _ = self;
+            return config.description;
         }
 
         /// Get the default value as a string, returns `null` if no default is set.
@@ -126,7 +116,7 @@ pub fn Option(comptime T: type) type {
                 }
 
                 for (default.items) |item| {
-                    const item_str = try valueToString(T, item, self.allocator);
+                    const item_str = try valueToString(config.type, item, self.allocator);
                     try result.append(self.allocator, item_str);
                 }
 
@@ -136,7 +126,7 @@ pub fn Option(comptime T: type) type {
         }
 
         /// Get the value of the option, returns default if not set, error if neither is available
-        pub fn getValue(self: *const Self) ![]T {
+        pub fn getValue(self: *const Self) ![]config.type {
             if (self.value) |v| {
                 return v.items;
             }
@@ -148,12 +138,14 @@ pub fn Option(comptime T: type) type {
 
         /// Get the long name of the option
         pub fn getName(self: *const Self) ?[]const u8 {
-            return self.name;
+            _ = self;
+            return config.long_name;
         }
 
         /// Get the short name of the option
         pub fn getShort(self: *const Self) ?u8 {
-            return self.short;
+            _ = self;
+            return config.short_name;
         }
 
         /// Get the arity of the option
@@ -172,9 +164,9 @@ pub fn Option(comptime T: type) type {
         }
 
         /// Set the value of the option
-        pub fn setValue(self: *Self, value: T) void {
+        pub fn setValue(self: *Self, value: config.type) void {
             if (self.value == null) {
-                self.value = ArrayList(T).empty;
+                self.value = ArrayList(config.type).empty;
             }
 
             self.value.?.append(self.allocator, value) catch {
@@ -334,24 +326,21 @@ pub const OptionInterface = struct {
         getShort: *const fn (ptr: *anyopaque) ?u8,
         getArity: *const fn (ptr: *anyopaque) Arity,
         hasDefault: *const fn (ptr: *anyopaque) bool,
-        type_name: []const u8,
     };
 
     /// Create an OptionInterface from a typed option
-    pub fn init(comptime InnerType: type, option_ptr: *Option(InnerType)) Self {
-        const T = @TypeOf(option_ptr.*);
-
+    pub fn init(comptime config: OptConfig, option_ptr: *Option(config)) Self {
         const Vtable = struct {
             const vtable = OptionVTable{
                 .getDescription = struct {
                     fn getDescription(ptr: *anyopaque) []const u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.getDescription();
                     }
                 }.getDescription,
                 .getDefaultValueAsString = struct {
                     fn getDefaultValueAsString(ptr: *anyopaque) anyerror!?[]u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         const values = self.getDefaultValueAsString() catch return null;
                         if (values == null) return null; // nothing set
 
@@ -382,7 +371,7 @@ pub const OptionInterface = struct {
                 }.getDefaultValueAsString,
                 .getValueAsString = struct {
                     fn getValueAsString(ptr: *anyopaque, allocator: Allocator) anyerror!?[][]u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         const values = self.getValue() catch return null;
 
                         // Convert array of values to array of strings
@@ -395,7 +384,7 @@ pub const OptionInterface = struct {
                         }
 
                         for (values) |value| {
-                            const value_str = try valueToString(InnerType, value, allocator);
+                            const value_str = try valueToString(config.type, value, allocator);
                             try result.append(allocator, value_str);
                         }
 
@@ -404,9 +393,9 @@ pub const OptionInterface = struct {
                 }.getValueAsString,
                 .setValueFromString = struct {
                     fn setValueFromString(ptr: *anyopaque, str_value: []const u8) anyerror!void {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
 
-                        const inner_type_info = @typeInfo(InnerType);
+                        const inner_type_info = @typeInfo(config.type);
                         const needs_allocator = switch (inner_type_info) {
                             .array => true,
                             .pointer => |ptr_info| ptr_info.size == .slice and ptr_info.child != u8,
@@ -415,44 +404,43 @@ pub const OptionInterface = struct {
                         };
 
                         const typed_value = if (needs_allocator)
-                            try parseValueFromStringWithAllocator(InnerType, str_value, self.allocator)
+                            try parseValueFromStringWithAllocator(config.type, str_value, self.allocator)
                         else
-                            try parseValueFromString(InnerType, str_value);
+                            try parseValueFromString(config.type, str_value);
 
                         self.setValue(typed_value);
                     }
                 }.setValueFromString,
                 .hasValue = struct {
                     fn hasValue(ptr: *anyopaque) bool {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.value != null;
                     }
                 }.hasValue,
                 .getName = struct {
                     fn getName(ptr: *anyopaque) ?[]const u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.getName();
                     }
                 }.getName,
                 .getShort = struct {
                     fn getShort(ptr: *anyopaque) ?u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.getShort();
                     }
                 }.getShort,
                 .getArity = struct {
                     fn getArity(ptr: *anyopaque) Arity {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.getArity();
                     }
                 }.getArity,
                 .hasDefault = struct {
                     fn hasDefault(ptr: *anyopaque) bool {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Option(config) = @ptrCast(@alignCast(ptr));
                         return self.hasDefault();
                     }
                 }.hasDefault,
-                .type_name = @typeName(InnerType),
             };
         };
 
@@ -506,15 +494,5 @@ pub const OptionInterface = struct {
     /// Check if the option has a default value
     pub fn hasDefault(self: Self) bool {
         return self.vtable.hasDefault(self.ptr);
-    }
-
-    /// Get the type name as a string
-    pub fn getTypeName(self: Self) []const u8 {
-        return self.vtable.type_name;
-    }
-
-    /// Check if the option is of a specific type by comparing type names
-    pub fn isType(self: Self, comptime T: type) bool {
-        return std.mem.eql(u8, self.vtable.type_name, @typeName(T));
     }
 };

@@ -68,6 +68,15 @@ pub fn Parser(comptime config: ParserConfig) type {
             // Parse the arguments first
             self.parseArgs(&args);
 
+            // Check if help should be printed first
+            if (self.print_help) {
+                const command_for_help = if (self.parse_result) |result| result.command else self.root_command;
+                command_for_help.generateHelp(self.allocator) catch {
+                    std.log.err("Failed to generate help message\n", .{});
+                };
+                std.process.exit(0);
+            }
+
             // check if all required positional arguments are provided and meet arity requirements
             if (self.parse_result) |result| {
                 for (result.command.arguments.items) |arg| {
@@ -94,15 +103,6 @@ pub fn Parser(comptime config: ParserConfig) type {
 
             // Set default values for options that weren't provided
             self.setDefaultValues();
-
-            // Check if help should be printed after parsing
-            if (self.print_help) {
-                const command_for_help = if (self.parse_result) |result| result.command else self.root_command;
-                command_for_help.generateHelp(self.allocator) catch {
-                    std.log.err("Failed to generate help message\n", .{});
-                };
-                std.process.exit(0);
-            }
 
             // If there were parsing errors, print help and exit
             if (self.has_errors) {
@@ -239,10 +239,10 @@ pub fn Parser(comptime config: ParserConfig) type {
 
             // Check for -o=value format
             if (std.mem.indexOf(u8, arg, "=")) |eq_pos| {
-                option_name = arg[2..eq_pos];
+                option_name = arg[1..eq_pos];
                 option_value = arg[eq_pos + 1 ..];
-                if (option_value == null) {
-                    std.log.err("Missing value for option -{s}\n", .{option_name});
+                if (option_name.len == 0) {
+                    std.log.err("Missing option name before '='\n", .{});
                     return;
                 }
                 self.parseSinleShortOption(option_name[0], option_value.?);
@@ -311,32 +311,14 @@ pub fn Parser(comptime config: ParserConfig) type {
             }
 
             if (initial_value) |init_val| {
-                if (std.mem.indexOf(u8, init_val, ",")) |_| {
-                    var it = std.mem.splitScalar(u8, init_val, ',');
-                    while (it.next()) |part| {
-                        const trimmed = std.mem.trim(u8, part, " \t");
-                        if (trimmed.len == 0) {
-                            continue;
-                        }
-                        const duped = self.allocator.dupe(u8, trimmed) catch {
-                            self.has_errors = true;
-                            return;
-                        };
-                        list.append(self.allocator, duped) catch {
-                            self.has_errors = true;
-                            return;
-                        };
-                    }
-                } else {
-                    const duped = self.allocator.dupe(u8, init_val) catch {
-                        self.has_errors = true;
-                        return;
-                    };
-                    list.append(self.allocator, duped) catch {
-                        self.has_errors = true;
-                        return;
-                    };
-                }
+                const duped = self.allocator.dupe(u8, init_val) catch {
+                    self.has_errors = true;
+                    return;
+                };
+                list.append(self.allocator, duped) catch {
+                    self.has_errors = true;
+                    return;
+                };
             }
 
             if (args) |arg_iter| {

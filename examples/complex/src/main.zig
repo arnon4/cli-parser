@@ -1,11 +1,13 @@
 const std = @import("std");
 
 const Argument = @import("parser").Argument;
+const ArgConfig = @import("parser").ArgConfig;
 const ActionContext = @import("parser").ActionContext;
 const ActionFn = @import("parser").ActionFn;
 const Command = @import("parser").Command;
 const Flag = @import("parser").Flag;
 const Option = @import("parser").Option;
+const OptConfig = @import("parser").OptConfig;
 const Parser = @import("parser").Parser;
 
 pub fn main() !void {
@@ -14,25 +16,45 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     // Create options
-    var int_opt = try Option(i32).init("An integer option", allocator);
-    _ = int_opt.withName("int")
-        .withShort('i')
-        .withDefaultValue(42);
+    const int_opt_config = OptConfig{
+        .type = i32,
+        .long_name = "int",
+        .short_name = 'i',
+        .description = "An integer option",
+    };
+    const int_opt = try Option(int_opt_config).init(allocator);
 
     const worker_struct = struct {
         name: []const u8,
         id: u32,
     };
 
-    var worker_opt = try Option(worker_struct).init("Worker option", allocator);
-    _ = worker_opt.withName("worker")
-        .withShort('w');
+    const worker_opt_config = OptConfig{
+        .type = worker_struct,
+        .long_name = "worker",
+        .short_name = 'w',
+        .description = "A worker struct option (JSON)",
+    };
+    const worker_opt = try Option(worker_opt_config).init(allocator);
 
     // Create arguments
-    const str_arg = try Argument([]const u8).init("input", "A string argument", false, allocator);
+    const str_arg_config = ArgConfig{
+        .type = []const u8,
+        .name = "input",
+        .description = "A string argument",
+        .required = true,
+    };
+    const str_arg = try Argument(str_arg_config).init(allocator); // required arguments may only have arity of 1
 
     // Create a struct argument for testing JSON parsing
-    var struct_arg = try Argument(worker_struct).init("worker_arg", "A worker struct argument", true, allocator);
+    const struct_arg_config = ArgConfig{
+        .type = worker_struct,
+        .name = "worker_arg",
+        .description = "A worker struct argument",
+        .required = false,
+    };
+    var struct_arg = try Argument(struct_arg_config).init(allocator);
+
     _ = struct_arg.withArity(.{
         .min = 1,
         .max = 2,
@@ -97,12 +119,12 @@ pub fn main() !void {
     const sub_cmd = try Command.init("sub", "A subcommand", allocator);
 
     // Register options, arguments, flags, and action
-    _ = sub_cmd.withOption(worker_struct, worker_opt)
-        .withArgument([]const u8, str_arg)
-        .withArgument(worker_struct, struct_arg)
+    _ = sub_cmd.withOption(worker_opt_config, worker_opt)
+        .withArgument(str_arg_config, str_arg)
+        .withArgument(struct_arg_config, struct_arg) // Required arguments must be added before optional arguments
         .withAction(action);
 
-    _ = cmd.withOption(i32, int_opt)
+    _ = cmd.withOption(int_opt_config, int_opt)
         .withFlag(flag)
         .withSubcommand(sub_cmd); // Register the subcommand
 
@@ -117,4 +139,11 @@ pub fn main() !void {
     const result = try parser.parse();
 
     try result.invoke();
+
+    // Try running with:
+    // demo sub "hello world" '{"name":"Jane","id":456}' '{"name":"Joan","id":789}' --worker '{"name":"John","id":123}' -i 32
+    // demo sub "hello world" '{"name":"Jane","id":456}' -w '{"name":"John","id":123}' -i 12
+    // demo sub "hello world" '{"name":"Jane","id":456}' -w='{"name":"John","id":123}'
+    // demo
+    // demo sub -h
 }

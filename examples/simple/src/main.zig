@@ -9,7 +9,7 @@ const Option = @import("parser").Option;
 const Parser = @import("parser").Parser;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -62,4 +62,10 @@ pub fn main() !void {
 
     // Execute the command action with the populated context
     try result.invoke();
+
+    // Try running with:
+    // demo -i -42 negative
+    // demo --int=100 hello --verbose
+    // demo hello
+    // demo --help
 }

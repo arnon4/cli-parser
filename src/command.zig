@@ -3,16 +3,20 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const log = std.log;
 
-const option = @import("option.zig");
-const flag = @import("flag.zig");
-const argument = @import("argument.zig");
-const action_context = @import("action_context.zig");
+const Option = @import("option.zig").Option;
+const OptionInterface = @import("option.zig").OptionInterface;
+const OptConfig = @import("opt_config.zig");
+const Flag = @import("flag.zig").Flag;
+const Argument = @import("argument.zig").Argument;
+const ArgumentInterface = @import("argument.zig").ArgumentInterface;
+const ArgConfig = @import("arg_config.zig");
+const ActionContext = @import("action_context.zig").ActionContext;
 const ExitCode = @import("exit_code.zig").ExitCode;
 const exit = @import("exit_code.zig").exit;
 
 const ArrayList = std.ArrayList;
 /// Function pointer type for command actions
-pub const ActionFn = *const fn (context: action_context.ActionContext) anyerror!void;
+pub const ActionFn = *const fn (context: ActionContext) anyerror!void;
 
 const HELP_PADDING: usize = 30;
 
@@ -26,9 +30,9 @@ pub const Command = struct {
     action: ?ActionFn = null,
     allocator: Allocator,
 
-    options: ArrayList(option.OptionInterface) = .empty,
-    flags: ArrayList(*flag.Flag) = .empty,
-    arguments: ArrayList(argument.ArgumentInterface) = .empty,
+    options: ArrayList(OptionInterface) = .empty,
+    flags: ArrayList(*Flag) = .empty,
+    arguments: ArrayList(ArgumentInterface) = .empty,
     subcommands: ArrayList(*Self) = .empty,
 
     /// Initialize a command
@@ -38,16 +42,11 @@ pub const Command = struct {
             .name = name,
             .description = description,
             .allocator = allocator,
-            .options = ArrayList(option.OptionInterface).empty,
-            .flags = ArrayList(*flag.Flag).empty,
-            .arguments = ArrayList(argument.ArgumentInterface).empty,
+            .options = ArrayList(OptionInterface).empty,
+            .flags = ArrayList(*Flag).empty,
+            .arguments = ArrayList(ArgumentInterface).empty,
             .subcommands = ArrayList(*Self).empty,
         };
-
-        // // Automatically add help flag to every command
-        // const help_flag = try flag.Flag.init("Help", false, allocator);
-        // _ = help_flag.withName("help").withShort('h');
-        // _ = try command.withFlag(help_flag);
 
         return command;
     }
@@ -71,10 +70,10 @@ pub const Command = struct {
     }
 
     /// Add an option to the command
-    pub fn withOption(self: *Self, comptime T: type, concrete_option: *option.Option(T)) *Self {
-        const option_interface = option.OptionInterface.init(T, concrete_option);
+    pub fn withOption(self: *Self, comptime config: OptConfig, concrete_option: *Option(config)) *Self {
+        const option_interface = OptionInterface.init(config, concrete_option);
         self.options.append(self.allocator, option_interface) catch {
-            log.err("Failed to add option: {s}", .{concrete_option.name.?});
+            log.err("Failed to add option: {s}", .{concrete_option.getName().?});
             exit(ExitCode.OutOfMemory);
         };
 
@@ -82,7 +81,7 @@ pub const Command = struct {
     }
 
     /// Add a flag to the command
-    pub fn withFlag(self: *Self, command_flag: *flag.Flag) *Self {
+    pub fn withFlag(self: *Self, command_flag: *Flag) *Self {
         self.flags.append(self.allocator, command_flag) catch {
             log.err("Failed to add flag: {s}", .{command_flag.name.?});
             exit(ExitCode.OutOfMemory);
@@ -92,10 +91,20 @@ pub const Command = struct {
     }
 
     /// Add an argument to the command
-    pub fn withArgument(self: *Self, comptime T: type, concrete_argument: *argument.Argument(T)) *Self {
-        const argument_interface = argument.ArgumentInterface.init(T, concrete_argument);
+    pub fn withArgument(self: *Self, comptime config: ArgConfig, concrete_argument: *Argument(config)) *Self {
+        const argument_interface = ArgumentInterface.init(config, concrete_argument);
+        // ensure optional arguments come after required ones
+        if (concrete_argument.isRequired()) {
+            for (self.arguments.items) |arg| {
+                if (!arg.vtable.isRequired(arg.ptr)) {
+                    log.err("Cannot add required argument '{s}' after optional arguments", .{concrete_argument.getName()});
+                    exit(ExitCode.InvalidConfiguration);
+                }
+            }
+        }
+
         self.arguments.append(self.allocator, argument_interface) catch {
-            log.err("Failed to add argument: {s}", .{concrete_argument.name});
+            log.err("Failed to add argument: {s}", .{concrete_argument.getName()});
             exit(ExitCode.OutOfMemory);
         };
 
@@ -136,11 +145,12 @@ pub const Command = struct {
     }
 
     /// Execute the command's action with a pre-populated context
-    pub fn invoke(self: *const Self, context: *action_context.ActionContext) !void {
+    pub fn invoke(self: *const Self, context: *ActionContext) !void {
         if (self.action) |action| {
             try action(context.*);
         } else {
-            return error.NoActionDefined;
+            // No action defined, print help
+            try self.generateHelp(context.allocator);
         }
     }
 
@@ -311,7 +321,7 @@ pub const Command = struct {
     }
 
     /// Find an option by name
-    pub fn findOption(self: *const Self, name: []const u8) ?option.OptionInterface {
+    pub fn findOption(self: *const Self, name: []const u8) ?OptionInterface {
         for (self.options.items) |opt| {
             if (opt.getName()) |opt_name| {
                 if (std.mem.eql(u8, opt_name, name)) {
@@ -329,7 +339,7 @@ pub const Command = struct {
     }
 
     /// Find an option by short flag
-    pub fn findOptionByShort(self: *const Self, short: u8) ?option.OptionInterface {
+    pub fn findOptionByShort(self: *const Self, short: u8) ?OptionInterface {
         for (self.options.items) |opt| {
             if (opt.getShort()) |opt_short| {
                 if (opt_short == short) {
@@ -347,7 +357,7 @@ pub const Command = struct {
     }
 
     /// Find a flag by name
-    pub fn findFlag(self: *const Self, name: []const u8) ?*flag.Flag {
+    pub fn findFlag(self: *const Self, name: []const u8) ?*Flag {
         for (self.flags.items) |command_flag| {
             if (command_flag.getName()) |flag_name| {
                 if (std.mem.eql(u8, flag_name, name)) {
@@ -365,7 +375,7 @@ pub const Command = struct {
     }
 
     /// Find a flag by short character
-    pub fn findFlagByShort(self: *const Self, short: u8) ?*flag.Flag {
+    pub fn findFlagByShort(self: *const Self, short: u8) ?*Flag {
         for (self.flags.items) |command_flag| {
             if (command_flag.getShort()) |flag_short| {
                 if (flag_short == short) {

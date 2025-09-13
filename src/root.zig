@@ -6,10 +6,14 @@ const action_context = @import("action_context.zig");
 const parser = @import("parser.zig");
 const arity = @import("arity.zig");
 const exit_code = @import("exit_code.zig");
+const arg_config = @import("arg_config.zig");
+const opt_config = @import("opt_config.zig");
 
 pub const Option = option.Option;
+pub const OptConfig = opt_config;
 pub const Flag = flag.Flag;
 pub const Argument = argument.Argument;
+pub const ArgConfig = arg_config;
 pub const Command = command.Command;
 pub const ActionFn = command.ActionFn;
 pub const ActionContext = action_context.ActionContext;

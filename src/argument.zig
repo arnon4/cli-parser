@@ -5,34 +5,40 @@ const ArrayList = std.ArrayList;
 const Arity = @import("arity.zig").Arity;
 const ExitCode = @import("exit_code.zig").ExitCode;
 const exit = @import("exit_code.zig").exit;
+const ArgConfig = @import("arg_config.zig");
 
-/// Generic Argument constructor function
-pub fn Argument(comptime T: type) type {
+/// Generic Argument constructor function.
+pub fn Argument(comptime config: ArgConfig) type {
     return struct {
         const Self = @This();
 
-        name: []const u8,
-        description: []const u8,
-        required: bool = false,
-        default_value: ?ArrayList(T) = null,
-        value: ?ArrayList(T) = null,
-        allocator: Allocator,
+        /// The arity of the argument (min/max number of values).
+        /// Required arguments must have an arity of exactly 1.
         arity: Arity = Arity.zero_or_one,
+        /// The default value(s) for the argument (if any).
+        default_value: ?ArrayList(config.type) = null,
+        /// The current value(s) for the argument (if any).
+        value: ?ArrayList(config.type) = null,
+        allocator: Allocator,
 
-        /// Initialize an argument with a name, description, required flag, and allocator
-        pub fn init(name: []const u8, description: []const u8, required: bool, allocator: Allocator) !*Self {
+        /// Initialize an argument with a name, description, required flag, and allocator.
+        pub fn init(allocator: Allocator) !*Self {
             const argument = try allocator.create(Self);
             argument.* = Self{
-                .name = name,
-                .description = description,
-                .required = required,
                 .allocator = allocator,
             };
+
+            if (comptime config.required) {
+                argument.arity = Arity{
+                    .min = 1,
+                    .max = 1,
+                };
+            }
 
             return argument;
         }
 
-        /// Deinitialize the argument
+        /// Deinitialize the argument.
         pub fn deinit(self: *Self) void {
             if (self.default_value != null) {
                 self.default_value.?.deinit(self.allocator);
@@ -43,18 +49,18 @@ pub fn Argument(comptime T: type) type {
             self.allocator.destroy(self);
         }
 
-        /// Set the default values for the argument (only valid for optional arguments)
-        pub fn withDefaultValues(self: *Self, default_values: []const T) *Self {
+        /// Set the default values for the argument (only valid for optional arguments).
+        pub fn withDefaultValues(self: *Self, default_values: []const config.type) *Self {
             if (self.default_value != null) {
                 @panic("Default value already set");
             }
-            if (!self.required) {
+            if (!config.required) {
                 if (default_values.len < self.arity.min or default_values.len > self.arity.max) {
                     @panic("Value length does not meet argument arity requirements");
                 }
-                self.default_value = ArrayList(T).empty;
+                self.default_value = ArrayList(config.type).empty;
                 self.default_value.?.appendSlice(self.allocator, default_values) catch {
-                    std.log.err("OutOfMemory when setting default value to {s}\n", .{self.name});
+                    std.log.err("OutOfMemory when setting default value to {s}\n", .{config.name});
                     exit(ExitCode.OutOfMemory);
                 };
             } else {
@@ -64,54 +70,74 @@ pub fn Argument(comptime T: type) type {
             return self;
         }
 
-        /// Convenience: set a single default value (arity max must be <= 1)
-        pub fn withDefaultValue(self: *Self, value: T) *Self {
+        /// Convenience: set a single default value (arity max must be <= 1).
+        pub fn withDefaultValue(self: *Self, value: config.type) *Self {
             if (self.arity.max > 1) @panic("withDefaultValue only valid when arity max <= 1");
-            var buf: [1]T = undefined;
+            var buf: [1]config.type = undefined;
             buf[0] = value;
             return self.withDefaultValues(buf[0..1]);
         }
 
-        /// Set the current values for the argument
-        pub fn withValues(self: *Self, values: []const T) *Self {
+        /// Set the current values for the argument.
+        pub fn withValues(self: *Self, values: []const config.type) *Self {
             if (self.value != null) {
                 @panic("Value already set");
             }
             if (values.len < self.arity.min or values.len > self.arity.max) {
                 @panic("Value length does not meet argument arity requirements");
             }
-            self.value = ArrayList(T).empty;
+            self.value = ArrayList(config.type).empty;
             self.value.?.appendSlice(self.allocator, values) catch {
-                std.log.err("OutOfMemory when setting value to {s}\n", .{self.name});
+                std.log.err("OutOfMemory when setting value to {s}\n", .{config.name});
                 exit(ExitCode.OutOfMemory);
             };
 
             return self;
         }
 
-        /// Convenience: set a single value (arity max must be <= 1)
-        pub fn withValue(self: *Self, value: T) *Self {
-            if (self.arity.max > 1) @panic("withValue (singular) only valid when arity max <= 1");
-            var buf: [1]T = undefined;
+        /// Convenience: set a single value (arity max must be <= 1).
+        pub fn withValue(self: *Self, value: config.type) *Self {
+            if (self.arity.max > 1) {
+                @panic("withValue (singular) only valid when arity max <= 1");
+            }
+
+            var buf: [1]config.type = undefined;
             buf[0] = value;
             return self.withValues(buf[0..1]);
         }
 
-        /// Set the arity for the argument
+        /// Set the arity for the argument.
         pub fn withArity(self: *Self, arity: Arity) *Self {
+            if (comptime config.required) {
+                @panic("Required arguments must have an arity of exactly 1");
+            }
+
+            if (arity.min > arity.max) {
+                @panic("Arity min cannot be greater than max");
+            }
+
+            if (comptime config.required) {
+                if (arity.min == 0) {
+                    @panic("Required arguments must have min arity >= 1");
+                }
+
+                if (arity.min == std.math.maxInt(u8) or arity.max == std.math.maxInt(u8)) {
+                    @panic("Required arguments cannot have unbounded arity");
+                }
+            }
             self.arity = arity;
             return self;
         }
 
-        /// Get the value of the argument, returns default if not set, error if neither is available
-        pub fn getValue(self: *Self) ![]T {
+        /// Get the value of the argument, returns default if not set, error if neither is available.
+        pub fn getValue(self: *Self) ![]config.type {
             if (self.value) |v| {
                 return v.items;
             }
             if (self.default_value) |d| {
                 return d.items;
             }
-            if (self.required) {
+            if (config.required) {
                 return error.RequiredArgumentMissing;
             }
             return error.NoValueSet;
@@ -130,7 +156,7 @@ pub fn Argument(comptime T: type) type {
                 }
 
                 for (default.items) |item| {
-                    const item_str = try valueToString(T, item, self.allocator);
+                    const item_str = try valueToString(config.type, item, self.allocator);
                     try result.append(self.allocator, item_str);
                 }
 
@@ -141,12 +167,14 @@ pub fn Argument(comptime T: type) type {
 
         /// Get the name of the argument
         pub fn getName(self: *Self) []const u8 {
-            return self.name;
+            _ = self;
+            return config.name;
         }
 
         /// Get the description of the argument
         pub fn getDescription(self: *Self) []const u8 {
-            return self.description;
+            _ = self;
+            return config.description;
         }
 
         /// Get the arity of the argument
@@ -156,7 +184,14 @@ pub fn Argument(comptime T: type) type {
 
         /// Check if the argument is required
         pub fn isRequired(self: *Self) bool {
-            return self.required;
+            _ = self;
+            return config.required;
+        }
+
+        /// Get the type of the argument's value
+        pub fn getValueType(self: *Self) type {
+            _ = self;
+            return config.type;
         }
 
         /// Check if the argument has a value set
@@ -170,20 +205,20 @@ pub fn Argument(comptime T: type) type {
         }
 
         /// Set the value of the argument
-        pub fn setValue(self: *Self, value: T) void {
+        pub fn setValue(self: *Self, value: config.type) void {
             if (self.value == null) {
-                self.value = ArrayList(T).empty;
+                self.value = ArrayList(config.type).empty;
             }
 
             self.value.?.append(self.allocator, value) catch {
-                std.log.err("OutOfMemory when setting value to {s}\n", .{self.name});
+                std.log.err("OutOfMemory when setting value to {s}\n", .{config.name});
                 exit(ExitCode.OutOfMemory);
             };
         }
 
         /// Validate that the argument meets its requirements
         pub fn validate(self: *Self) !void {
-            if (self.required and self.value == null and self.default_value == null) {
+            if (config.required and self.value == null and self.default_value == null) {
                 return error.RequiredArgumentMissing;
             }
         }
@@ -336,24 +371,21 @@ pub const ArgumentInterface = struct {
         getName: *const fn (ptr: *anyopaque) []const u8,
         isRequired: *const fn (ptr: *anyopaque) bool,
         hasDefault: *const fn (ptr: *anyopaque) bool,
-        type_name: []const u8,
     };
 
     /// Create an ArgumentInterface from a typed argument
-    pub fn init(comptime InnerType: type, arg_ptr: *Argument(InnerType)) Self {
-        const T = @TypeOf(arg_ptr.*);
-
+    pub fn init(comptime config: ArgConfig, arg_ptr: *Argument(config)) Self {
         const VTable = struct {
             const vtable = ArgumentVTable{
                 .getDescription = struct {
                     fn getDescription(ptr: *anyopaque) []const u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.getDescription();
                     }
                 }.getDescription,
                 .getDefaultValueAsString = struct {
                     fn getDefaultValueAsString(ptr: *anyopaque, allocator: Allocator) anyerror!?[]u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         const values = self.getDefaultValueAsString() catch return null;
                         if (values == null) return null;
 
@@ -374,7 +406,7 @@ pub const ArgumentInterface = struct {
                 }.getDefaultValueAsString,
                 .getValueAsString = struct {
                     fn getValueAsString(ptr: *anyopaque, allocator: Allocator) anyerror!?[][]u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         const values = self.getValue() catch return null;
 
                         // Convert array of values to array of strings
@@ -387,7 +419,7 @@ pub const ArgumentInterface = struct {
                         }
 
                         for (values) |value| {
-                            const value_str = try valueToString(InnerType, value, allocator);
+                            const value_str = try valueToString(config.type, value, allocator);
                             try result.append(allocator, value_str);
                         }
 
@@ -396,9 +428,9 @@ pub const ArgumentInterface = struct {
                 }.getValueAsString,
                 .setValueFromString = struct {
                     fn setValueFromString(ptr: *anyopaque, str_value: []const u8) anyerror!void {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
 
-                        const inner_type_info = @typeInfo(InnerType);
+                        const inner_type_info = @typeInfo(config.type);
                         const needs_allocator = switch (inner_type_info) {
                             .array => true,
                             .pointer => |ptr_info| ptr_info.size == .slice and ptr_info.child != u8,
@@ -407,44 +439,43 @@ pub const ArgumentInterface = struct {
                         };
 
                         const typed_value = if (needs_allocator)
-                            try parseValueFromStringWithAllocator(InnerType, str_value, self.allocator)
+                            try parseValueFromStringWithAllocator(config.type, str_value, self.allocator)
                         else
-                            try parseValueFromString(InnerType, str_value);
+                            try parseValueFromString(config.type, str_value);
 
                         self.setValue(typed_value);
                     }
                 }.setValueFromString,
                 .getArity = struct {
                     fn getArity(ptr: *anyopaque) Arity {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.getArity();
                     }
                 }.getArity,
                 .hasValue = struct {
                     fn hasValue(ptr: *anyopaque) bool {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.value != null;
                     }
                 }.hasValue,
                 .getName = struct {
                     fn getName(ptr: *anyopaque) []const u8 {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.getName();
                     }
                 }.getName,
                 .isRequired = struct {
                     fn isRequired(ptr: *anyopaque) bool {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.isRequired();
                     }
                 }.isRequired,
                 .hasDefault = struct {
                     fn hasDefault(ptr: *anyopaque) bool {
-                        const self: *T = @ptrCast(@alignCast(ptr));
+                        const self: *Argument(config) = @ptrCast(@alignCast(ptr));
                         return self.hasDefault();
                     }
                 }.hasDefault,
-                .type_name = @typeName(InnerType),
             };
         };
 
@@ -498,10 +529,5 @@ pub const ArgumentInterface = struct {
     /// Get the arity of the argument
     pub fn getArity(self: Self) Arity {
         return self.vtable.getArity(self.ptr);
-    }
-
-    /// Get the type name of the argument
-    pub fn getTypeName(self: Self) []const u8 {
-        return self.vtable.type_name;
     }
 };
