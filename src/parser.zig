@@ -139,13 +139,13 @@ pub fn Parser(comptime config: ParserConfig) type {
                     if (comptime config.allow_options_after_args == false) {
                         if (args_reached) {
                             // Treat as positional argument instead of option
-                            self.parseCommandOrPositional(arg_slice, &positional_index, &args_reached);
+                            self.parseCommandOrPositional(arg, &positional_index, &args_reached);
                             continue;
                         }
                     }
                     self.parseHyphenArg(arg_slice, @constCast(args), &args_reached, &positional_index);
                 } else {
-                    self.parseCommandOrPositional(arg_slice, &positional_index, &args_reached);
+                    self.parseCommandOrPositional(arg, &positional_index, &args_reached);
                 }
             }
 
@@ -168,9 +168,9 @@ pub fn Parser(comptime config: ParserConfig) type {
                 self.parseLongOption(arg, args);
             } else if (!std.mem.startsWith(u8, arg, "--") and arg.len > 1) {
                 // Short option(s) or flag(s)
-                self.parseShortOptions(arg, args);
+                self.parseShortOptions(arg, args, positional_index, args_reached);
             } else {
-                self.parseCommandOrPositional(arg, positional_index, args_reached); // treat as positional
+                self.parseCommandOrPositional(arg, positional_index, args_reached);
             }
         }
 
@@ -235,7 +235,7 @@ pub fn Parser(comptime config: ParserConfig) type {
             self.print_help = true;
         }
 
-        fn parseShortOptions(self: *Self, arg: []const u8, args: *ArgIterator) void {
+        fn parseShortOptions(self: *Self, arg: []const u8, args: *ArgIterator, positional_index: *usize, args_reached: *bool) void {
             var char_index: usize = 1; // Skip the '-'
 
             var option_name: []const u8 = undefined;
@@ -249,7 +249,7 @@ pub fn Parser(comptime config: ParserConfig) type {
                     std.log.err("Missing option name before '='\n", .{});
                     return;
                 }
-                self.parseSinleShortOption(option_name[0], option_value.?);
+                _ = self.parseSinleShortOption(option_name[0], option_value.?);
                 return;
             }
 
@@ -267,7 +267,16 @@ pub fn Parser(comptime config: ParserConfig) type {
             if (!self.parseSingleShortFlag(short_char)) {
                 // Not a flag, try as an option
                 option_value = args.next();
-                self.parseSinleShortOption(short_char, option_value);
+                if (comptime config.allow_options_after_args == false) {
+                    if (!self.parseSinleShortOption(short_char, option_value)) {
+                        // Treat as positional argument instead of option
+                        self.parseCommandOrPositional(arg, positional_index, args_reached);
+                        if (option_value) |val| {
+                            self.setPositionalArgumentByIndex(val, positional_index);
+                        }
+                        return;
+                    }
+                }
             }
         }
 
@@ -374,13 +383,13 @@ pub fn Parser(comptime config: ParserConfig) type {
             transferred = true;
         }
 
-        fn parseSinleShortOption(self: *Self, short_char: u8, value: ?[]const u8) void {
+        fn parseSinleShortOption(self: *Self, short_char: u8, value: ?[]const u8) bool {
             for (self.parse_result.?.command.options.items) |option_item| {
                 if (option_item.getShort()) |short| {
                     if (short == short_char) {
                         if (option_item.getName()) |opt_name| {
                             self.parseOptionValues(option_item, opt_name, value, null);
-                            return;
+                            return true;
                         }
                     }
                 }
@@ -390,23 +399,25 @@ pub fn Parser(comptime config: ParserConfig) type {
             if (self.parse_result.?.command.parent) |parent_cmd| {
                 const original_command = self.parse_result.?.command;
                 self.parse_result.?.command = parent_cmd;
-                self.parseSinleShortOption(short_char, value);
-                self.parse_result.?.command = original_command;
-                return;
+                if (self.parseSinleShortOption(short_char, value)) {
+                    self.parse_result.?.command = original_command;
+                    return true;
+                }
             }
 
             if (short_char == 'h') {
                 self.print_help = true;
-                return;
+                return true;
             }
 
             if (comptime config.allow_unknown_options) {
-                return; // silently ignore unknown options
+                return false;
             }
 
             std.log.err("Unknown option -{c}\n", .{short_char});
             self.has_errors = true;
             self.print_help = true;
+            return false;
         }
 
         fn parseCommandOrPositional(self: *Self, arg: []const u8, positional_index: *usize, args_reached: *bool) void {
