@@ -178,7 +178,7 @@ pub const ActionContext = struct {
         return ActionError.OptionNotFound;
     }
 
-    pub fn getOptions(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !void {
+    pub fn getOptions(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !usize {
         if (self.options.get(name)) |value| {
             std.debug.assert(buffer.len >= value.value.items.len);
 
@@ -187,7 +187,7 @@ pub const ActionContext = struct {
                 buffer[i] = parsed_opt;
             }
 
-            return;
+            return value.value.items.len;
         }
 
         if (self.parent) |parent| {
@@ -268,8 +268,8 @@ pub const ActionContext = struct {
         return ActionError.ArgumentNotFound;
     }
 
-    /// Get all argument values by name and type.
-    pub fn getArguments(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !void {
+    /// Get all argument values by name and type. Returns the number of values found.
+    pub fn getArguments(self: *const Self, comptime T: type, name: []const u8, buffer: []T) !usize {
         if (self.arguments.get(name)) |value| {
             std.debug.assert(buffer.len >= value.value.items.len);
 
@@ -278,7 +278,7 @@ pub const ActionContext = struct {
                 buffer[i] = parsed_arg;
             }
 
-            return;
+            return value.value.items.len;
         }
 
         if (self.parent) |parent| {

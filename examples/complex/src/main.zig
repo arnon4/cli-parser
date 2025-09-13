@@ -72,16 +72,16 @@ pub fn main() !void {
 
             // Get the struct arguments (by name, JSON struct)
             var worker_args_buffer: [2]worker_struct = undefined; // Max arity is 2
-            context.getArguments(worker_struct, "worker_arg", &worker_args_buffer) catch {
+            const worker_count = context.getArguments(worker_struct, "worker_arg", &worker_args_buffer) catch {
                 std.debug.print("Error getting worker arguments\n", .{});
                 std.process.exit(1);
             };
 
-            if (worker_args_buffer.len == 0) {
+            if (worker_count == 0) {
                 try out.print("No worker_arg arguments provided.\n", .{});
             } else {
-                for (worker_args_buffer, 0..) |w, i| {
-                    try out.print("Worker_arg[{d}]: name={s}, id={d}\n", .{ i, w.name, w.id });
+                for (0..worker_count) |i| {
+                    try out.print("Worker_arg[{d}]: name={s}, id={d}\n", .{ i, worker_args_buffer[i].name, worker_args_buffer[i].id });
                 }
             }
 

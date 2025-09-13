@@ -21,7 +21,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("parser", parser_lib);
 
     const exe = b.addExecutable(.{
-        .name = "complex",
+        .name = "demo",
         .root_module = exe_mod,
     });
 
