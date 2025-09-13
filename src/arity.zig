@@ -32,9 +32,4 @@ pub const Arity = struct {
         .min = 1,
         .max = std.math.maxInt(u8),
     };
-    /// An arity that allows many values (up to the maximum of `usize`).
-    pub const many = Self{
-        .min = std.math.maxInt(u8),
-        .max = std.math.maxInt(u8),
-    };
 };

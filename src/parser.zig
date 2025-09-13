@@ -122,6 +122,7 @@ pub fn Parser(comptime config: ParserConfig) type {
                 self.has_errors = true;
                 return;
             };
+
             self.parse_result.?.command = self.root_command;
             self.parse_result.?.context = ActionContext.init(self.allocator, null) catch {
                 self.has_errors = true;
@@ -130,15 +131,18 @@ pub fn Parser(comptime config: ParserConfig) type {
             var positional_index: usize = 0;
 
             while (args.next()) |arg| {
-                if (comptime config.double_hyphen_delimiter or config.allow_options_after_args) {
-                    if (args_reached) {
-                        break;
-                    }
-                }
-
                 const arg_slice = arg[0..arg.len];
+
                 // Process each argument
                 if (std.mem.startsWith(u8, arg_slice, "-")) {
+                    // Only break on options/flags if we've reached args and don't allow options after args
+                    if (comptime config.allow_options_after_args == false) {
+                        if (args_reached) {
+                            // Treat as positional argument instead of option
+                            self.parseCommandOrPositional(arg_slice, &positional_index, &args_reached);
+                            continue;
+                        }
+                    }
                     self.parseHyphenArg(arg_slice, @constCast(args), &args_reached, &positional_index);
                 } else {
                     self.parseCommandOrPositional(arg_slice, &positional_index, &args_reached);
@@ -271,14 +275,24 @@ pub fn Parser(comptime config: ParserConfig) type {
             for (self.parse_result.?.command.flags.items) |flag_item| {
                 if (flag_item.short) |short| {
                     if (short == short_char) {
-                        self.parse_result.?.context.setFlag(flag_item.name.?, true) catch {
-                            self.has_errors = true;
-                        };
-                        // Check if this is the help flag
+                        // Use flag name if available, otherwise use short character as string
                         if (flag_item.name) |flag_name| {
+                            self.parse_result.?.context.setFlag(flag_name, true) catch {
+                                self.has_errors = true;
+                            };
+                            // Check if this is the help flag
                             if (std.mem.eql(u8, flag_name, "help")) {
                                 self.print_help = true;
                             }
+                        } else {
+                            // For flags without names, create a persistent single-character string
+                            const short_str = self.allocator.dupe(u8, &[_]u8{short}) catch {
+                                self.has_errors = true;
+                                return true;
+                            };
+                            self.parse_result.?.context.setFlag(short_str, true) catch {
+                                self.has_errors = true;
+                            };
                         }
                         return true;
                     }

@@ -261,41 +261,51 @@ pub const Command = struct {
         var has_flags = false;
 
         for (self.flags.items) |fl| {
-            if (fl.name) |name| {
-                if (!std.mem.eql(u8, name, "help")) {
-                    if (!has_flags) {
-                        try out.print("FLAGS:\n", .{});
-                        has_flags = true;
-                    }
+            // Show flags that have names, or flags that only have short characters
+            const should_show = if (fl.name) |name|
+                !std.mem.eql(u8, name, "help")
+            else
+                fl.short != null;
 
-                    var flag_line = ArrayList(u8).empty;
-                    defer flag_line.deinit(allocator);
+            if (should_show) {
+                if (!has_flags) {
+                    try out.print("FLAGS:\n", .{});
+                    has_flags = true;
+                }
 
-                    try flag_line.appendSlice(allocator, "  ");
+                var flag_line = ArrayList(u8).empty;
+                defer flag_line.deinit(allocator);
+
+                try flag_line.appendSlice(allocator, "  ");
+                if (fl.name) |name| {
+                    // Flag has a name, show both short and long forms
                     if (fl.short) |short| {
                         try flag_line.writer(allocator).print("-{c}, --{s}", .{ short, name });
                     } else {
                         try flag_line.writer(allocator).print("    --{s}", .{name});
                     }
+                } else if (fl.short) |short| {
+                    // Flag only has short form
+                    try flag_line.writer(allocator).print("-{c}", .{short});
+                }
 
-                    const flag_str = flag_line.items;
-                    const description = fl.getDescription();
+                const flag_str = flag_line.items;
+                const description = fl.getDescription();
 
-                    if (flag_str.len <= HELP_PADDING) {
-                        try out.print("{s}", .{flag_str});
-                        const padding = HELP_PADDING - flag_str.len;
-                        var i: usize = 0;
-                        while (i < padding) : (i += 1) {
-                            out.print(" ", .{}) catch {
-                                std.debug.print("Fatal error occurred", .{});
-                                std.process.exit(1);
-                            };
-                        }
-                        try out.print("{s}\n", .{description});
-                    } else {
-                        try out.print("{s}\n", .{flag_str});
-                        try out.print("                              {s}\n", .{description});
+                if (flag_str.len <= HELP_PADDING) {
+                    try out.print("{s}", .{flag_str});
+                    const padding = HELP_PADDING - flag_str.len;
+                    var i: usize = 0;
+                    while (i < padding) : (i += 1) {
+                        out.print(" ", .{}) catch {
+                            std.debug.print("Fatal error occurred", .{});
+                            std.process.exit(1);
+                        };
                     }
+                    try out.print("{s}\n", .{description});
+                } else {
+                    try out.print("{s}\n", .{flag_str});
+                    try out.print("                              {s}\n", .{description});
                 }
             }
         }
