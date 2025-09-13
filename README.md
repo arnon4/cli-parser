@@ -9,10 +9,22 @@ A flexible and type-safe command-line argument parser for Zig applications. Buil
 * Short & long options (`-i`, `--int`), boolean flags, positional arguments
 * JSON parsing for struct types (e.g. `--worker '{"name":"A","id":1}'`)
 * Arity support and default values (single or multiple)
+* Configurable parsing behavior (unknown options, delimiters, etc.)
 
 ## Usage
 
-See the [examples](./examples) directory for usage examples.
+See the [examples](./examples) directory for usage examples. Parser configuration has the following options:
+
+```zig
+const ParserConfig = struct {
+    /// Whether to allow unknown options (default: false)
+    allow_unknown_options: bool = false,
+    /// Whether to treat `--` as the end of options (default: true)
+    double_hyphen_delimiter: bool = true,
+    /// Whether to allow options after positional arguments (default: false)
+    allow_options_after_args: bool = false,
+};
+```
 
 ### How to Import
 
